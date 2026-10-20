@@ -213,18 +213,15 @@ def pixels():
 
 
 def colors():
-    # A tiny image classifier for examples/classify.esk: x float[1, 32, 32, 3] normalized
-    # with the ImageNet mean and std -> probabilities of red, green, blue and gray from
-    # the mean color of the image.
-    mean = tf.constant([0.485, 0.456, 0.406], dtype=tf.float32)
-    std = tf.constant([0.229, 0.224, 0.225], dtype=tf.float32)
+    # A tiny image classifier for examples/classify.esk: x float[1, 32, 32, 3] in -1..1
+    # ((pixel - 127.5) / 127.5, as MobileNet takes images) -> probabilities of red,
+    # green, blue and gray from the mean color of the image.
     w = tf.constant(np.array([[2, -1, -1, 0], [-1, 2, -1, 0], [-1, -1, 2, 0]], dtype=np.float32) * 8.0)
     b = tf.constant(np.array([0, 0, 0, 1.0], dtype=np.float32))
 
     @tf.function(input_signature=[tf.TensorSpec([1, 32, 32, 3], tf.float32, name="image")])
     def f(image):
-        c = image * std + mean
-        p = tf.reduce_mean(c, axis=[1, 2])
+        p = tf.reduce_mean(image * 0.5 + 0.5, axis=[1, 2])
         return tf.nn.softmax(tf.matmul(p, w) + b)
     path = convert(f, os.path.join(EXAMPLES, "colors.tflite"))
     with open(os.path.join(EXAMPLES, "colors.txt"), "w") as fl:

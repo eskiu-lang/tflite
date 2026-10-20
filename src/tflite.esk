@@ -71,8 +71,16 @@ const int TFLITE_XNNPACK = 2;
 const int TFLITE_GPU = 3;
 const int TFLITE_COREML = 4;
 
-// Interpreter options. The zero value is the CPU with TensorFlow Lite's defaults
-// (which apply XNNPACK to the operations it supports).
+// Interpreter options. The zero value is TensorFlow Lite's default CPU kernels.
+// threads is the thread count (0 keeps TensorFlow Lite's choice). delegate is one
+// of TFLITE_CPU, TFLITE_XNNPACK (XNNPACK on every operation it supports, quantized
+// ones included, as Python's interpreter runs by default), TFLITE_GPU (Metal on
+// Apple, OpenCL or OpenGL on Linux), TFLITE_COREML, or TFLITE_AUTO (the GPU when its
+// delegate is found, else the CPU). A delegate that is missing or cannot take the
+// model is an error, unless fallback is set: then the interpreter runs on the CPU
+// and its delegate field says so. precision_loss lets the GPU compute in 16-bit
+// floats. delegate_path is the delegate's library, when it is not beside
+// libtensorflowlite_c.
 struct TfliteOptions {
     int threads;
     int delegate;
