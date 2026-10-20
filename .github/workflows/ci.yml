@@ -85,7 +85,7 @@ jobs:
           export PATH="$HOME/tflite/lib:$PATH"
           mkdir -p build/tests
           cp $HOME/tflite/lib/*.dll build/tests/
-          CC=gcc eskiuc -L$HOME/tflite/lib tests/mlp.esk -o build/tests/mlp1.exe && ls -la build/tests && (build/tests/mlp1.exe; echo "exit $?"); ldd build/tests/mlp1.exe || true
+          CC=gcc eskiuc -L$HOME/tflite/lib tests/mlp.esk -o build/tests/mlp1.exe && objdump -p build/tests/mlp1.exe | grep "DLL Name"; ldd build/tests/mlp1.exe || true; set +e; build/tests/mlp1.exe; echo "exit $?"; set -e
           CC=gcc eskiuc test -L$HOME/tflite/lib
       - name: Examples
         run: |
