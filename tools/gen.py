@@ -273,7 +273,9 @@ class Gen:
                "// Every function of c_api.h, operator.h and xnnpack_delegate.h, with its C name.",
                "// The GPU (OpenCL/OpenGL), Metal and Core ML delegates are separate libraries:",
                "// their option structs and enums are here, and <tflite> loads their functions.",
-               "", '#pragma link("tensorflowlite_c")', ""]
+               "", '#if defined(__wasm__) || defined(__ANDROID__) || defined(TARGET_OS_IPHONE) || !(defined(__x86_64__) || defined(__aarch64__))',
+               '#error "tflite: runs on 64-bit macOS, Linux and Windows for now"',
+               '#endif', "", '#pragma link("tensorflowlite_c")', ""]
         out.append('const string TFLITE_HEADERS_VERSION = "%s";' % VERSION)
         out.append("")
         for name in self.opaque:
