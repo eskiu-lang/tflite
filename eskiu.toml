@@ -5,3 +5,12 @@ main = "examples/classify.esk"
 
 [deps]
 gpu = { git = "https://github.com/eskiu-lang/gpu", rev = "v0.1.0" }
+
+# TensorFlow's own tensorflowlite_c target, from the Unity package of
+# asus4/tf-lite-unity-sample (Apache-2.0), fetched by eskiuc build / run / test / fetch.
+# Windows still takes tools/get_tflite.sh, which renames its DLL.
+[native.tensorflowlite_c]
+macos-arm64 = { url = "https://github.com/asus4/tf-lite-unity-sample/releases/download/v2.21.0-rc1/com.github.asus4.tflite-2.21.0-rc1.tgz", sha256 = "157d1936cd683aa8e1775f9b6f5ae2dafb652f4af9555f969b8563934133b645", lib = "package/Plugins/macOS" }
+macos-x86_64 = { url = "https://github.com/asus4/tf-lite-unity-sample/releases/download/v2.21.0-rc1/com.github.asus4.tflite-2.21.0-rc1.tgz", sha256 = "157d1936cd683aa8e1775f9b6f5ae2dafb652f4af9555f969b8563934133b645", lib = "package/Plugins/macOS" }
+linux-x86_64 = { url = "https://github.com/asus4/tf-lite-unity-sample/releases/download/v2.21.0-rc1/com.github.asus4.tflite-2.21.0-rc1.tgz", sha256 = "157d1936cd683aa8e1775f9b6f5ae2dafb652f4af9555f969b8563934133b645", lib = "package/Plugins/Linux/x86_64" }
+linux-arm64 = { url = "https://github.com/asus4/tf-lite-unity-sample/releases/download/v2.21.0-rc1/com.github.asus4.tflite-2.21.0-rc1.tgz", sha256 = "157d1936cd683aa8e1775f9b6f5ae2dafb652f4af9555f969b8563934133b645", lib = "package/Plugins/Linux/arm64" }
