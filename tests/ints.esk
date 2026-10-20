@@ -1,0 +1,49 @@
+import <io>;
+import <mem>;
+import <tflite>;
+
+// int64 and uint8 inputs; float32, int32 and int64 outputs.
+// ids -> y = ids * 3 + 1 (int64), n = ids as int32; pix -> f = pix / 255.
+
+Result<int, string> run() {
+    TfliteInterpreter it = tflite_load("tests/data/ints.tflite", null)?;
+    defer it.release();
+    if (it.input_count() != 2 || it.output_count() != 3) return Err<int, string>("counts");
+    int ids_at = it.input_index("ids");
+    int pix_at = it.input_index("pix");
+    if (ids_at < 0 || pix_at < 0 || it.input_index("nope") != -1) return Err<int, string>("input names");
+    if (it.input(ids_at).type != TFLITE_INT64 || it.input(pix_at).type != TFLITE_UINT8) return Err<int, string>("input types");
+    int64[3] ids = {2, -5, 7};
+    uint8[4] pix = {0, 51, 255, 128};
+    int[1] s3 = {3};
+    int[1] s4 = {4};
+    it.set_i64(ids_at, &ids[0], &s3[0], 1)?;
+    it.set_u8(pix_at, &pix[0], &s4[0], 1)?;
+    it.invoke()?;
+    // The converter orders outputs by name: f, n, y.
+    *TfliteTensor f = it.output(0);
+    *TfliteTensor n = it.output(1);
+    *TfliteTensor y = it.output(2);
+    if (f.f32() == null || n.i32() == null || y.i64() == null) return Err<int, string>("output types");
+    if (f.i32() != null || n.f32() != null || y.u8() != null) return Err<int, string>("typed views");
+    for (i in 0..3) {
+        if (y.i64()[i] != ids[i] * 3 + 1) return Err<int, string>("y");
+        if ((int64)n.i32()[i] != ids[i]) return Err<int, string>("n");
+        if (y.at((uint64)i) != (double)(ids[i] * 3 + 1)) return Err<int, string>("at");
+    }
+    for (i in 0..4) {
+        float d = f.f32()[i] - (float)pix[i] / 255.0;
+        if (d > 0.000001 || d < -0.000001) return Err<int, string>("f");
+    }
+    if (y.argmax() != 2 || tflite_type_size(y.type) != 8 || tflite_type_size(n.type) != 4) return Err<int, string>("argmax");
+    return Ok<int, string>(0);
+}
+
+int main() {
+    Result<int, string> r = run();
+    if (!r.ok) {
+        printf("FAIL: %s\n", r.error);
+        return 1;
+    }
+    return 0;
+}

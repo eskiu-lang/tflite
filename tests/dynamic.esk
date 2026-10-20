@@ -1,0 +1,67 @@
+import <io>;
+import <mem>;
+import <fs>;
+import <tflite>;
+
+// A dynamic batch dimension: the signature says [-1, 3]; setting a [5, 3] input
+// resizes it, and the outputs follow.
+
+*float load(string path) {
+    int64 n = 0;
+    return (*float)fs_read_all(path, &n);
+}
+
+bool near(*float got, *float want, int n) {
+    for (i in 0..n) {
+        float d = got[i] - want[i];
+        if (d > 0.00001 || d < -0.00001) return false;
+    }
+    return true;
+}
+
+Result<int, string> run() {
+    TfliteInterpreter it = tflite_load("tests/data/dynamic.tflite", null)?;
+    defer it.release();
+    *TfliteTensor x = it.input(0);
+    if (x.signature.size != 2 || x.signature.data[0] != -1 || x.signature.data[1] != 3) return Err<int, string>("signature");
+    if (x.dim(0) != 1 || x.dim(1) != 3) return Err<int, string>("default shape");
+    String text;
+    defer String_free(&text);
+    tflite_shape_text(x.signature.data, x.signature.size, &text);
+    if (strcmp(text.data, "[-1, 3]") != 0) return Err<int, string>("shape text");
+
+    *float in5 = load("tests/data/dynamic_x.bin");
+    *float y5 = load("tests/data/dynamic_y.bin");
+    *float z5 = load("tests/data/dynamic_z.bin");
+    defer {
+        free(in5);
+        free(y5);
+        free(z5);
+    }
+    int[2] shape = {5, 3};
+    it.set_f32(0, in5, &shape[0], 2)?;
+    if (it.input(0).dim(0) != 5) return Err<int, string>("resized");
+    it.invoke()?;
+    *TfliteTensor y = it.output(0);
+    *TfliteTensor z = it.output(1);
+    if (y.dim(0) != 5 || y.dim(1) != 3 || z.rank() != 1 || z.dim(0) != 5) return Err<int, string>("output shapes");
+    if (!near(y.f32(), y5, 15) || !near(z.f32(), z5, 5)) return Err<int, string>("output values");
+
+    // Back to two rows, by an explicit resize.
+    int[2] two = {2, 3};
+    it.resize_input(0, &two[0], 2)?;
+    if (it.input(0).len() != 6 || it.input(0).bytes != 24) return Err<int, string>("resize");
+    it.set_f32(0, in5, &two[0], 2)?;
+    it.invoke()?;
+    if (it.output(1).dim(0) != 2 || !near(it.output(1).f32(), z5, 2)) return Err<int, string>("two rows");
+    return Ok<int, string>(0);
+}
+
+int main() {
+    Result<int, string> r = run();
+    if (!r.ok) {
+        printf("FAIL: %s\n", r.error);
+        return 1;
+    }
+    return 0;
+}

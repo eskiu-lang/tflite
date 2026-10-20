@@ -1,0 +1,121 @@
+import <io>;
+import <mem>;
+import <fs>;
+import <tflite>;
+
+// Delegates: the CPU always works; XNNPACK is part of the library; the GPU delegate
+// (Metal on Apple, OpenCL/OpenGL on Linux) and Core ML are separate and may be
+// missing, or present without a usable device (as on CI machines). Asking for one
+// that cannot run is an error, or the CPU with fallback set.
+
+*float load(string path) {
+    int64 n = 0;
+    return (*float)fs_read_all(path, &n);
+}
+
+Result<int, string> run_conv(*TfliteOptions o, *int used, double tolerance) {
+    TfliteInterpreter it = tflite_load("tests/data/conv.tflite", o)?;
+    defer it.release();
+    *used = it.delegate;
+    *float x = load("tests/data/conv_x.bin");
+    *float want = load("tests/data/conv_y.bin");
+    defer free(x);
+    defer free(want);
+    int[4] shape = {1, 6, 6, 1};
+    it.set_f32(0, x, &shape[0], 4)?;
+    it.invoke()?;
+    *float got = it.output(0).f32();
+    for (i in 0..18) {
+        double d = (double)(got[i] - want[i]);
+        if (d > tolerance || d < -tolerance) return Err<int, string>("output values");
+    }
+    return Ok<int, string>(0);
+}
+
+Result<int, string> run_quant(*TfliteOptions o) {
+    TfliteInterpreter it = tflite_load("tests/data/quant.tflite", o)?;
+    defer it.release();
+    int64 n = 0;
+    *int8 x = (*int8)fs_read_all("tests/data/quant_x.bin", &n);
+    *int8 want = (*int8)fs_read_all("tests/data/quant_y.bin", &n);
+    defer free((*void)x);
+    defer free((*void)want);
+    int[2] shape = {1, 8};
+    it.set_i8(0, x, &shape[0], 2)?;
+    it.invoke()?;
+    for (i in 0..3) {
+        int d = (int)it.output(0).i8()[i] - (int)want[i];
+        if (d > 1 || d < -1) return Err<int, string>("quantized output");
+    }
+    return Ok<int, string>(0);
+}
+
+int main() {
+    printf("TensorFlow Lite %s; GPU delegate %s, Core ML delegate %s\n", tflite_version(),
+        tflite_has_delegate(TFLITE_GPU) ? "found" : "not found",
+        tflite_has_delegate(TFLITE_COREML) ? "found" : "not found");
+    int used = -1;
+    TfliteOptions cpu = TfliteOptions{threads: 2};
+    Result<int, string> r = run_conv(&cpu, &used, 0.0001);
+    if (!r.ok || used != TFLITE_CPU) {
+        printf("cpu: %s\n", r.ok ? "wrong delegate" : r.error);
+        return 1;
+    }
+
+    TfliteOptions xnn = TfliteOptions{delegate: TFLITE_XNNPACK, threads: 2};
+    r = run_conv(&xnn, &used, 0.0001);
+    if (!r.ok || used != TFLITE_XNNPACK) {
+        printf("xnnpack: %s\n", r.ok ? "wrong delegate" : r.error);
+        return 1;
+    }
+    r = run_quant(&xnn);
+    if (!r.ok) {
+        printf("xnnpack int8: %s\n", r.error);
+        return 1;
+    }
+    printf("XNNPACK ran\n");
+
+    // The GPU delegate: when it is found, it either runs (on a machine with a
+    // usable GPU) or fails to apply; fallback always ends on a working interpreter.
+    TfliteOptions gpu = TfliteOptions{delegate: TFLITE_GPU, fallback: true};
+    r = run_conv(&gpu, &used, 0.01);
+    if (!r.ok) {
+        printf("gpu with fallback: %s\n", r.error);
+        return 1;
+    }
+    printf("GPU with fallback ran on %s\n", tflite_delegate_name(used));
+    TfliteOptions auto_ = TfliteOptions{delegate: TFLITE_AUTO, fallback: true};
+    r = run_conv(&auto_, &used, 0.01);
+    if (!r.ok) {
+        printf("auto: %s\n", r.error);
+        return 1;
+    }
+    printf("auto ran on %s\n", tflite_delegate_name(used));
+
+    int[2] wanted = {TFLITE_GPU, TFLITE_COREML};
+    for (i in 0..2) {
+        int d = wanted[i];
+        if (tflite_has_delegate(d)) continue;
+        TfliteOptions strict = TfliteOptions{delegate: d};
+        r = run_conv(&strict, &used, 0.01);
+        if (r.ok || strstr(r.error, "no ") == null) {
+            printf("%s: wanted a missing-delegate error, got %s\n", tflite_delegate_name(d), r.ok ? "success" : r.error);
+            return 1;
+        }
+        printf("%s\n", r.error);
+        TfliteOptions loose = TfliteOptions{delegate: d, fallback: true};
+        r = run_conv(&loose, &used, 0.0001);
+        if (!r.ok || used != TFLITE_CPU) {
+            printf("%s fallback: %s\n", tflite_delegate_name(d), r.ok ? "wrong delegate" : r.error);
+            return 1;
+        }
+    }
+    TfliteOptions missing = TfliteOptions{delegate: TFLITE_GPU, delegate_path: "no/such/libdelegate.so"};
+    r = run_conv(&missing, &used, 0.01);
+    if (r.ok || strstr(r.error, "cannot open no/such/libdelegate.so") == null) {
+        printf("delegate_path: %s\n", r.ok ? "success" : r.error);
+        return 1;
+    }
+    printf("%s\n", r.error);
+    return 0;
+}

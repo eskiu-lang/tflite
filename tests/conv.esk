@@ -1,0 +1,49 @@
+import <io>;
+import <mem>;
+import <fs>;
+import <tflite>;
+
+// Conv2D (SAME padding) + MaxPool on an NHWC image, against Python's output.
+
+*float load(string path) {
+    int64 n = 0;
+    return (*float)fs_read_all(path, &n);
+}
+
+Result<int, string> run() {
+    TfliteInterpreter it = tflite_load("tests/data/conv.tflite", null)?;
+    defer it.release();
+    *float x = load("tests/data/conv_x.bin");
+    *float want = load("tests/data/conv_y.bin");
+    defer free(x);
+    defer free(want);
+    int[4] shape = {1, 6, 6, 1};
+    it.set_f32(0, x, &shape[0], 4)?;
+    it.invoke()?;
+    *TfliteTensor y = it.output(0);
+    if (y.rank() != 4 || y.dim(1) != 3 || y.dim(2) != 3 || y.dim(3) != 2 || y.len() != 18) return Err<int, string>("output shape");
+    *float got = y.f32();
+    for (i in 0..18) {
+        float d = got[i] - want[i];
+        if (d > 0.0001 || d < -0.0001) {
+            printf("y[%d] = %f, want %f\n", i, (double)got[i], (double)want[i]);
+            return Err<int, string>("output values");
+        }
+    }
+    // A second run on new data reuses the interpreter.
+    for (i in 0..36) x[i] = 0.0;
+    it.set_f32(0, x, &shape[0], 4)?;
+    it.invoke()?;
+    got = it.output(0).f32();
+    if (got[0] < 0.0999 || got[0] > 0.1001 || got[1] < -0.2001 || got[1] > -0.1999) return Err<int, string>("bias only");
+    return Ok<int, string>(0);
+}
+
+int main() {
+    Result<int, string> r = run();
+    if (!r.ok) {
+        printf("FAIL: %s\n", r.error);
+        return 1;
+    }
+    return 0;
+}

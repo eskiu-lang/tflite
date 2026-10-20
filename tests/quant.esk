@@ -1,0 +1,110 @@
+import <io>;
+import <mem>;
+import <fs>;
+import <tflite>;
+
+// Fully integer-quantized models (int8 and uint8 inputs and outputs): the scale
+// and zero point of each tensor, raw integer runs against Python's output, and
+// float inputs quantized by set_float.
+
+*uint8 load(string path) {
+    int64 n = 0;
+    return fs_read_all(path, &n);
+}
+
+bool near(float a, float b) {
+    float d = a - b;
+    return d < 0.000001 && d > -0.000001;
+}
+
+Result<int, string> check(string name, int type) {
+    String path;
+    defer String_free(&path);
+    String_appendf(&path, "tests/data/%s.tflite", name);
+    TfliteInterpreter it = tflite_load(path.data, null)?;
+    defer it.release();
+
+    // [input scale, input zero point, output scale, output zero point] from Python.
+    String_clear(&path);
+    String_appendf(&path, "tests/data/%s_q.bin", name);
+    *uint8 q = load(path.data);
+    defer free(q);
+    float in_scale = ((*float)q)[0];
+    int in_zp = ((*int)q)[1];
+    float out_scale = ((*float)q)[2];
+    int out_zp = ((*int)q)[3];
+    *TfliteTensor x = it.input(0);
+    *TfliteTensor y = it.output(0);
+    if (x.type != type || y.type != type) return Err<int, string>("types");
+    if (!x.quantized() || !near(x.scale, in_scale) || x.zero_point != in_zp) return Err<int, string>("input quantization");
+    if (!near(y.scale, out_scale) || y.zero_point != out_zp) return Err<int, string>("output quantization");
+
+    String_clear(&path);
+    String_appendf(&path, "tests/data/%s_x.bin", name);
+    *uint8 xq = load(path.data);
+    defer free(xq);
+    String_clear(&path);
+    String_appendf(&path, "tests/data/%s_xf.bin", name);
+    *float xf = (*float)load(path.data);
+    defer free((*void)xf);
+    String_clear(&path);
+    String_appendf(&path, "tests/data/%s_y.bin", name);
+    *uint8 want = load(path.data);
+    defer free(want);
+
+    // Python quantized xf with the input's parameters; tflite_quantize agrees.
+    for (i in 0..8) {
+        int v = tflite_quantize(xf[i], x.scale, x.zero_point, type);
+        int w = (int)xq[i];
+        if (type == TFLITE_INT8) w = (int)((*int8)xq)[i];
+        if (v != w) {
+            printf("quantize(%f) = %d, want %d\n", (double)xf[i], v, w);
+            return Err<int, string>("quantize");
+        }
+    }
+
+    int[2] shape = {1, 8};
+    if (type == TFLITE_INT8) it.set_i8(0, (*int8)xq, &shape[0], 2)?;
+    else it.set_u8(0, xq, &shape[0], 2)?;
+    it.invoke()?;
+    y = it.output(0);
+    for (i in 0..3) {
+        if (((*uint8)y.data)[i] != want[i]) return Err<int, string>("raw output");
+    }
+    // Dequantized values.
+    *float f = y.floats();
+    defer free((*void)f);
+    for (i in 0..3) {
+        double v = ((double)(int)want[i] - (double)out_zp) * (double)out_scale;
+        if (type == TFLITE_INT8) v = ((double)(int)((*int8)want)[i] - (double)out_zp) * (double)out_scale;
+        double d = (double)f[i] - v;
+        if (d > 0.00001 || d < -0.00001 || (float)y.value(i) != f[i]) return Err<int, string>("dequantized output");
+        if (tflite_dequantize((int)y.at(i), y.scale, y.zero_point) != f[i]) return Err<int, string>("tflite_dequantize");
+    }
+
+    // set_float quantizes the same floats to the same integers.
+    it.set_float(0, xf, &shape[0], 2)?;
+    for (i in 0..8) {
+        if (((*uint8)it.input(0).data)[i] != xq[i]) return Err<int, string>("set_float");
+    }
+    it.invoke()?;
+    for (i in 0..3) {
+        if (((*uint8)it.output(0).data)[i] != want[i]) return Err<int, string>("set_float run");
+    }
+    printf("%s: in %s scale %.9f zero %d, out scale %.9f zero %d, values %.4f %.4f %.4f\n", name,
+        tflite_type_name(type), (double)x.scale, x.zero_point, (double)y.scale, y.zero_point,
+        (double)f[0], (double)f[1], (double)f[2]);
+    return Ok<int, string>(0);
+}
+
+int main() {
+    Result<int, string> r = check("quant", TFLITE_INT8);
+    if (r.ok) r = check("quant_u8", TFLITE_UINT8);
+    if (!r.ok) {
+        printf("FAIL: %s\n", r.error);
+        return 1;
+    }
+    if (tflite_quantize(1000.0, 0.5, 3, TFLITE_INT8) != 127 || tflite_quantize(-1000.0, 0.5, 3, TFLITE_UINT8) != 0) return 1;
+    if (tflite_quantize(0.25, 0.5, 0, TFLITE_INT8) != 1 || tflite_quantize(-0.25, 0.5, 0, TFLITE_INT8) != -1) return 1;
+    return 0;
+}

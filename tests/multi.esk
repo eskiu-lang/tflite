@@ -1,0 +1,38 @@
+import <io>;
+import <mem>;
+import <tflite>;
+
+// Two inputs and three outputs: neg = -a, prod = a @ b, sum = a + b.
+
+Result<int, string> run() {
+    TfliteInterpreter it = tflite_load("tests/data/multi.tflite", null)?;
+    defer it.release();
+    if (it.input_count() != 2 || it.output_count() != 3) return Err<int, string>("counts");
+    if (strcmp(it.input(0).name.data, "a") != 0 || strcmp(it.input(1).name.data, "b") != 0) return Err<int, string>("names");
+    if (it.input(5) != null || it.output(-1) != null) return Err<int, string>("out of range");
+    float[4] a = {1.0, 2.0, 3.0, 4.0};
+    float[4] b = {5.0, 6.0, 7.0, 8.0};
+    int[2] shape = {2, 2};
+    it.set_f32(0, &a[0], &shape[0], 2)?;
+    it.set_f32(1, &b[0], &shape[0], 2)?;
+    it.invoke()?;
+    float[4] neg = {-1.0, -2.0, -3.0, -4.0};
+    float[4] prod = {19.0, 22.0, 43.0, 50.0};
+    float[4] sum = {6.0, 8.0, 10.0, 12.0};
+    for (i in 0..4) {
+        if (it.output(0).f32()[i] != neg[i]) return Err<int, string>("neg");
+        if (it.output(1).f32()[i] != prod[i]) return Err<int, string>("prod");
+        if (it.output(2).f32()[i] != sum[i]) return Err<int, string>("sum");
+    }
+    if (it.output_index(it.output(2).name.data) != 2) return Err<int, string>("output_index");
+    return Ok<int, string>(0);
+}
+
+int main() {
+    Result<int, string> r = run();
+    if (!r.ok) {
+        printf("FAIL: %s\n", r.error);
+        return 1;
+    }
+    return 0;
+}
