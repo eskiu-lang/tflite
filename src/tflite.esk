@@ -1,0 +1,1008 @@
+// tflite.esk: TensorFlow Lite model inference (<tflite>).
+//
+// tflite_load() reads a .tflite file and makes an interpreter for it; set_input()
+// fills an input from typed data, invoke() runs the model and output(i) is the
+// result. Every fallible call returns a Result whose error is a message from
+// TensorFlow Lite or from the checks here; the message lives in a buffer that the
+// next error reuses, so copy it to keep it. Models and interpreters have a release
+// method, meant to be paired with defer:
+//
+//     TfliteInterpreter it = tflite_load("model.tflite", null)?;
+//     defer it.release();
+//     int[2] shape = {1, 4};
+//     it.set_f32(0, &x[0], &shape[0], 2)?;
+//     it.invoke()?;
+//     *float y = it.output(0).f32();
+//
+// The whole C API is in <tflite/raw> for anything this layer does not cover.
+
+import <io>;
+import <mem>;
+import <string>;
+import <list>;
+import <result>;
+import <tflite/raw>;
+
+#ifdef _WIN32
+extern *void LoadLibraryA(string name);
+extern *void GetProcAddress(*void lib, string name);
+#else
+#ifdef __linux__
+#pragma link("dl")
+#endif
+extern *void dlopen(string path, int flags);
+extern *void dlsym(*void lib, string name);
+extern string dlerror();
+
+struct _TfliteDlInfo {
+    string fname;
+    *void fbase;
+    string sname;
+    *void saddr;
+}
+
+extern int dladdr(*void addr, *_TfliteDlInfo info);
+#endif
+
+// Element types, the values of TfLiteType.
+const int TFLITE_NOTYPE = 0;
+const int TFLITE_FLOAT32 = 1;
+const int TFLITE_INT32 = 2;
+const int TFLITE_UINT8 = 3;
+const int TFLITE_INT64 = 4;
+const int TFLITE_STRING = 5;
+const int TFLITE_BOOL = 6;
+const int TFLITE_INT16 = 7;
+const int TFLITE_COMPLEX64 = 8;
+const int TFLITE_INT8 = 9;
+const int TFLITE_FLOAT16 = 10;
+const int TFLITE_FLOAT64 = 11;
+const int TFLITE_COMPLEX128 = 12;
+const int TFLITE_UINT64 = 13;
+const int TFLITE_UINT32 = 16;
+const int TFLITE_UINT16 = 17;
+const int TFLITE_INT4 = 18;
+const int TFLITE_BFLOAT16 = 19;
+
+// Delegates for TfliteOptions.delegate.
+const int TFLITE_CPU = 0;
+const int TFLITE_AUTO = 1;
+const int TFLITE_XNNPACK = 2;
+const int TFLITE_GPU = 3;
+const int TFLITE_COREML = 4;
+
+// Interpreter options. The zero value is the CPU with TensorFlow Lite's defaults
+// (which apply XNNPACK to the operations it supports).
+struct TfliteOptions {
+    int threads;
+    int delegate;
+    bool fallback;
+    bool precision_loss;
+    string delegate_path;
+}
+
+// A model's bytes when it was loaded from memory: TensorFlow Lite reads them for
+// as long as the model or an interpreter made from it lives.
+struct _TfliteBlob {
+    int refs;
+    *uint8 data;
+}
+
+struct TfliteModel {
+    *TfLiteModel handle;
+    *_TfliteBlob blob;
+}
+
+// An input or output tensor: its name, element type, shape (with signature giving
+// -1 for a dynamic dimension), quantization (scale 0 when it has none) and data.
+// The data belongs to the interpreter; it moves when an input is resized, and
+// output shapes can change with each run, so read them after invoke().
+struct TfliteTensor {
+    *TfLiteTensor handle;
+    String name;
+    int type;
+    List<int> shape;
+    List<int> signature;
+    uint64 count;
+    uint64 bytes;
+    *void data;
+    float scale;
+    int zero_point;
+}
+
+struct TfliteInterpreter {
+    *TfLiteInterpreter handle;
+    int delegate;
+    *TfLiteDelegate _delegate;
+    *void _delegate_free;
+    *_TfliteBlob _blob;
+    *TfLiteModel _own_model;
+    List<TfliteTensor> inputs;
+    List<TfliteTensor> outputs;
+}
+
+String _tflite_err;
+String _tflite_log;
+
+// TensorFlow Lite's error reporter: collects the messages of the current call.
+void _tflite_report(*void user, string format, va_list args) {
+    char[1024] buf;
+    vsnprintf(&buf[0], 1024, format, args);
+    if (_tflite_log.len > 0) String_append(&_tflite_log, "; ");
+    String_append(&_tflite_log, (string)&buf[0]);
+}
+
+string _tflite_fail(string what) {
+    String_clear(&_tflite_err);
+    String_append(&_tflite_err, what);
+    if (_tflite_log.len > 0) {
+        String_append(&_tflite_err, ": ");
+        String_append(&_tflite_err, _tflite_log.data);
+    }
+    String_clear(&_tflite_log);
+    return _tflite_err.data;
+}
+
+// The TensorFlow Lite version of the loaded library, such as "2.21.0".
+string tflite_version() {
+    return TfLiteVersion();
+}
+
+// The bytes of one element of the given type; 0 for strings, 4-bit and unknown types.
+int tflite_type_size(int type) {
+    if (type == TFLITE_UINT8 || type == TFLITE_INT8 || type == TFLITE_BOOL) return 1;
+    if (type == TFLITE_INT16 || type == TFLITE_UINT16 || type == TFLITE_FLOAT16 || type == TFLITE_BFLOAT16) return 2;
+    if (type == TFLITE_FLOAT32 || type == TFLITE_INT32 || type == TFLITE_UINT32) return 4;
+    if (type == TFLITE_INT64 || type == TFLITE_UINT64 || type == TFLITE_FLOAT64 || type == TFLITE_COMPLEX64) return 8;
+    if (type == TFLITE_COMPLEX128) return 16;
+    return 0;
+}
+
+// The name of an element type ("float32", "int8", ...).
+string tflite_type_name(int type) {
+    if (type == TFLITE_FLOAT32) return "float32";
+    if (type == TFLITE_INT32) return "int32";
+    if (type == TFLITE_UINT8) return "uint8";
+    if (type == TFLITE_INT64) return "int64";
+    if (type == TFLITE_STRING) return "string";
+    if (type == TFLITE_BOOL) return "bool";
+    if (type == TFLITE_INT16) return "int16";
+    if (type == TFLITE_COMPLEX64) return "complex64";
+    if (type == TFLITE_INT8) return "int8";
+    if (type == TFLITE_FLOAT16) return "float16";
+    if (type == TFLITE_FLOAT64) return "float64";
+    if (type == TFLITE_COMPLEX128) return "complex128";
+    if (type == TFLITE_UINT64) return "uint64";
+    if (type == TFLITE_UINT32) return "uint32";
+    if (type == TFLITE_UINT16) return "uint16";
+    if (type == TFLITE_INT4) return "int4";
+    if (type == TFLITE_BFLOAT16) return "bfloat16";
+    if (type == TFLITE_NOTYPE) return "no type";
+    return "other";
+}
+
+// Appends a shape as [1, 224, 224, 3] to out.
+void tflite_shape_text(*int shape, int rank, String* out) {
+    String_append(out, "[");
+    for (i in 0..rank) {
+        if (i > 0) String_append(out, ", ");
+        String_appendf(out, "%d", shape[i]);
+    }
+    String_append(out, "]");
+}
+
+// --- quantization and float16 ---
+
+// The integer nearest to v / scale + zero_point (halves away from zero, as
+// TensorFlow Lite's Quantize), clamped to the range of type: TFLITE_INT8, UINT8,
+// INT16, UINT16 or INT32. A zero scale gives zero_point.
+int tflite_quantize(float v, float scale, int zero_point, int type) {
+    double q = (double)zero_point;
+    if (scale != 0.0) {
+        double r = (double)v / (double)scale;
+        if (r >= 0.0) r = (double)(int64)(r + 0.5);
+        else r = -(double)(int64)(-r + 0.5);
+        q = r + (double)zero_point;
+    }
+    double lo = -2147483648.0;
+    double hi = 2147483647.0;
+    if (type == TFLITE_INT8) {
+        lo = -128.0;
+        hi = 127.0;
+    } else if (type == TFLITE_UINT8) {
+        lo = 0.0;
+        hi = 255.0;
+    } else if (type == TFLITE_INT16) {
+        lo = -32768.0;
+        hi = 32767.0;
+    } else if (type == TFLITE_UINT16) {
+        lo = 0.0;
+        hi = 65535.0;
+    }
+    if (q < lo) q = lo;
+    if (q > hi) q = hi;
+    return (int)q;
+}
+
+// The real value of a quantized integer: (q - zero_point) * scale.
+float tflite_dequantize(int q, float scale, int zero_point) {
+    return (float)((double)(q - zero_point) * (double)scale);
+}
+
+// The IEEE half-precision bits of f, rounded to nearest even.
+uint16 tflite_f32_to_f16(float f) {
+    float v = f;
+    uint32 x = *(*uint32)&v;
+    uint32 sign = (x >> 16) & 0x8000;
+    uint32 e = (x >> 23) & 0xff;
+    uint32 m = x & 0x7fffff;
+    if (e == 255) {
+        if (m != 0) return (uint16)(sign | 0x7e00);
+        return (uint16)(sign | 0x7c00);
+    }
+    int ex = (int)e - 112;
+    if (ex >= 31) return (uint16)(sign | 0x7c00);
+    if (ex <= 0) {
+        if (ex < -10) return (uint16)sign;
+        m = m | 0x800000;
+        uint32 shift = (uint32)(14 - ex);
+        uint32 h = m >> shift;
+        uint32 rem = m & (((uint32)1 << shift) - 1);
+        uint32 mid = (uint32)1 << (shift - 1);
+        if (rem > mid || (rem == mid && (h & 1) != 0)) h++;
+        return (uint16)(sign | h);
+    }
+    uint32 h = sign | ((uint32)ex << 10) | (m >> 13);
+    uint32 rem = m & 0x1fff;
+    if (rem > 0x1000 || (rem == 0x1000 && (h & 1) != 0)) h++;
+    return (uint16)h;
+}
+
+// The float value of IEEE half-precision bits.
+float tflite_f16_to_f32(uint16 bits) {
+    uint32 hb = (uint32)bits;
+    uint32 s = (hb & 0x8000) << 16;
+    uint32 e = (hb >> 10) & 0x1f;
+    uint32 m = hb & 0x3ff;
+    uint32 x = s;
+    if (e == 31) {
+        x = s | 0x7f800000 | (m << 13);
+    } else if (e != 0) {
+        x = s | ((e + 112) << 23) | (m << 13);
+    } else if (m != 0) {
+        uint32 ee = 113;
+        while ((m & 0x400) == 0) {
+            m = m << 1;
+            ee--;
+        }
+        x = s | (ee << 23) | ((m & 0x3ff) << 13);
+    }
+    float f = *(*float)&x;
+    return f;
+}
+
+// --- models ---
+
+void _tflite_blob_drop(*_TfliteBlob b) {
+    if (b == null) return;
+    b.refs--;
+    if (b.refs > 0) return;
+    free(b.data);
+    free(b);
+}
+
+// Loads a .tflite file.
+Result<TfliteModel, string> tflite_model(string path) {
+    String_clear(&_tflite_log);
+    *TfLiteModel m = TfLiteModelCreateFromFileWithErrorReporter(path, (*void)_tflite_report, null);
+    if (m == null) {
+        String what;
+        String_appendf(&what, "tflite: cannot load model '%s'", path);
+        string e = _tflite_fail(what.data);
+        String_free(&what);
+        return Err<TfliteModel, string>(e);
+    }
+    return Ok<TfliteModel, string>(TfliteModel{handle: m});
+}
+
+// Loads a model from the bytes of a .tflite file, which are copied.
+Result<TfliteModel, string> tflite_model_bytes(*uint8 data, uint64 len) {
+    if (data == null || len == 0) return Err<TfliteModel, string>(_tflite_fail("tflite: cannot load model: no data"));
+    *_TfliteBlob b = alloc<_TfliteBlob>(1);
+    b.refs = 1;
+    b.data = alloc<uint8>((int64)len);
+    memcpy(b.data, data, (int64)len);
+    String_clear(&_tflite_log);
+    *TfLiteModel m = TfLiteModelCreateWithErrorReporter((*void)b.data, len, (*void)_tflite_report, null);
+    if (m == null) {
+        _tflite_blob_drop(b);
+        return Err<TfliteModel, string>(_tflite_fail("tflite: cannot load model"));
+    }
+    return Ok<TfliteModel, string>(TfliteModel{handle: m, blob: b});
+}
+
+// Releases the model. Interpreters made from it keep working.
+void TfliteModel_release(*TfliteModel self) {
+    if (self.handle != null) TfLiteModelDelete(self.handle);
+    _tflite_blob_drop(self.blob);
+    *self = TfliteModel{};
+}
+
+// --- delegates ---
+
+// A fn value laid out by hand: { code, env }. A delegate library's functions are
+// called through one whose code is the C function and whose env is its argument.
+struct _TfliteRaw {
+    *void code;
+    *void env;
+}
+
+struct _TfliteFCreate {
+    fn()->*TfLiteDelegate f;
+}
+
+struct _TfliteFDelete {
+    fn()->void f;
+}
+
+*TfLiteDelegate _tflite_call_create(*void code, *void options) {
+    _TfliteRaw r = _TfliteRaw{code, options};
+    fn()->*TfLiteDelegate f = ((*_TfliteFCreate)&r).f;
+    return f();
+}
+
+void _tflite_call_delete(*void code, *TfLiteDelegate d) {
+    _TfliteRaw r = _TfliteRaw{code, (*void)d};
+    fn()->void f = ((*_TfliteFDelete)&r).f;
+    f();
+}
+
+// The name of a delegate constant ("CPU", "XNNPACK", "GPU", "Core ML").
+string tflite_delegate_name(int d) {
+    if (d == TFLITE_CPU) return "CPU";
+    if (d == TFLITE_AUTO) return "auto";
+    if (d == TFLITE_XNNPACK) return "XNNPACK";
+    if (d == TFLITE_GPU) return "GPU";
+    if (d == TFLITE_COREML) return "Core ML";
+    return "unknown";
+}
+
+// The library file and the create and delete functions of a delegate here.
+string _tflite_delegate_file(int d) {
+#ifdef __APPLE__
+    if (d == TFLITE_GPU) return "libtensorflowlite_metal_delegate.dylib";
+#endif
+#ifdef __linux__
+    if (d == TFLITE_GPU) return "libtensorflowlite_gpu_delegate.so";
+#endif
+    return null;
+}
+
+string _tflite_delegate_create_name(int d) {
+#ifdef __APPLE__
+    if (d == TFLITE_GPU) return "TFLGpuDelegateCreate";
+#else
+    if (d == TFLITE_GPU) return "TfLiteGpuDelegateV2Create";
+#endif
+    if (d == TFLITE_COREML) return "TfLiteCoreMlDelegateCreate";
+    return null;
+}
+
+string _tflite_delegate_delete_name(int d) {
+#ifdef __APPLE__
+    if (d == TFLITE_GPU) return "TFLGpuDelegateDelete";
+#else
+    if (d == TFLITE_GPU) return "TfLiteGpuDelegateV2Delete";
+#endif
+    if (d == TFLITE_COREML) return "TfLiteCoreMlDelegateDelete";
+    return null;
+}
+
+#ifdef _WIN32
+*void _tflite_dlopen(string path) {
+    return LoadLibraryA(path);
+}
+
+*void _tflite_dlsym(*void lib, string name) {
+    return GetProcAddress(lib, name);
+}
+
+string _tflite_dlerror() {
+    return "LoadLibrary failed";
+}
+
+// The directory of libtensorflowlite_c, with a trailing separator; "" if unknown.
+void _tflite_lib_dir(String* out) {
+}
+#else
+*void _tflite_dlopen(string path) {
+    return dlopen(path, 2);
+}
+
+*void _tflite_dlsym(*void lib, string name) {
+    return dlsym(lib, name);
+}
+
+string _tflite_dlerror() {
+    string e = dlerror();
+    if (e == null) return "not found";
+    return e;
+}
+
+void _tflite_lib_dir(String* out) {
+    // TfLiteVersion() points into the library's own data, so dladdr names its file.
+    _TfliteDlInfo info;
+    if (dladdr((*void)TfLiteVersion(), &info) == 0 || info.fname == null) return;
+    int n = (int)strlen(info.fname);
+    int cut = -1;
+    for (i in 0..n) {
+        if (info.fname[i] == '/') cut = i;
+    }
+    int end = cut + 1;
+    for (i in 0..end) String_appendf(out, "%c", (int)info.fname[i]);
+}
+#endif
+
+// Opens the library that has delegate d's functions; null with the reason in why.
+*void _tflite_delegate_lib(*TfliteOptions o, int d, String* why) {
+    *void lib = null;
+    if (o.delegate_path != null) {
+        lib = _tflite_dlopen(o.delegate_path);
+        if (lib == null) String_appendf(why, "cannot open %s (%s)", o.delegate_path, _tflite_dlerror());
+        return lib;
+    }
+    String dir;
+    defer String_free(&dir);
+    _tflite_lib_dir(&dir);
+    if (d == TFLITE_COREML) {
+        // Core ML is part of libtensorflowlite_c in the builds that have it.
+        String path;
+        defer String_free(&path);
+        String_append(&path, dir.data);
+#ifdef __APPLE__
+        String_append(&path, "libtensorflowlite_c.dylib");
+#else
+        String_append(&path, "libtensorflowlite_c.so");
+#endif
+        lib = _tflite_dlopen(path.data);
+        if (lib == null || _tflite_dlsym(lib, "TfLiteCoreMlDelegateCreate") == null) {
+            String_append(why, "this TensorFlow Lite library has no Core ML delegate (TfLiteCoreMlDelegateCreate); set delegate_path to a library that has it");
+            return null;
+        }
+        return lib;
+    }
+    string file = _tflite_delegate_file(d);
+    if (file == null) {
+        String_appendf(why, "there is no %s delegate library for this platform; set delegate_path to one", tflite_delegate_name(d));
+        return null;
+    }
+    String path;
+    defer String_free(&path);
+    String_append(&path, dir.data);
+    String_append(&path, file);
+    lib = _tflite_dlopen(path.data);
+    if (lib == null) lib = _tflite_dlopen(file);
+    if (lib == null) String_appendf(why, "cannot open %s (%s)", (string)path.data, _tflite_dlerror());
+    return lib;
+}
+
+// True when delegate d can be created here: XNNPACK always, the GPU and Core ML
+// delegates when their library is found.
+bool tflite_has_delegate(int d) {
+    if (d == TFLITE_CPU || d == TFLITE_AUTO || d == TFLITE_XNNPACK) return true;
+    if (d != TFLITE_GPU && d != TFLITE_COREML) return false;
+    TfliteOptions o;
+    String why;
+    defer String_free(&why);
+    *void lib = _tflite_delegate_lib(&o, d, &why);
+    if (lib == null) return false;
+    return _tflite_dlsym(lib, _tflite_delegate_create_name(d)) != null;
+}
+
+// Makes delegate d; null with the reason in why.
+*TfLiteDelegate _tflite_make_delegate(*TfliteOptions o, int d, *TfliteInterpreter it, String* why) {
+    if (d == TFLITE_XNNPACK) {
+        TfLiteXNNPackDelegateOptions xo = TfLiteXNNPackDelegateOptionsDefault();
+        if (o.threads > 0) xo.num_threads = o.threads;
+        *TfLiteDelegate x = TfLiteXNNPackDelegateCreate(&xo);
+        if (x == null) String_append(why, "TfLiteXNNPackDelegateCreate failed");
+        return x;
+    }
+    *void lib = _tflite_delegate_lib(o, d, why);
+    if (lib == null) return null;
+    *void create = _tflite_dlsym(lib, _tflite_delegate_create_name(d));
+    *void del = _tflite_dlsym(lib, _tflite_delegate_delete_name(d));
+    if (create == null || del == null) {
+        String_appendf(why, "the library has no %s", _tflite_delegate_create_name(d));
+        return null;
+    }
+    *TfLiteDelegate x = null;
+    if (d == TFLITE_COREML) {
+        TfLiteCoreMlDelegateOptions co;
+        co.enabled_devices = TfLiteCoreMlDelegateAllDevices;
+        co.max_delegated_partitions = 0;
+        co.min_nodes_per_partition = 2;
+        x = _tflite_call_create(create, (*void)&co);
+    } else {
+#ifdef __APPLE__
+        TFLGpuDelegateOptions go;
+        go.allow_precision_loss = o.precision_loss;
+        go.wait_type = TFLGpuDelegateWaitTypePassive;
+        go.enable_quantization = true;
+        x = _tflite_call_create(create, (*void)&go);
+#else
+        TfLiteGpuDelegateOptionsV2 go;
+        go.is_precision_loss_allowed = o.precision_loss ? 1 : 0;
+        go.inference_preference = (int)TFLITE_GPU_INFERENCE_PREFERENCE_FAST_SINGLE_ANSWER;
+        go.inference_priority1 = (int)TFLITE_GPU_INFERENCE_PRIORITY_MAX_PRECISION;
+        if (o.precision_loss) go.inference_priority1 = (int)TFLITE_GPU_INFERENCE_PRIORITY_MIN_LATENCY;
+        go.inference_priority2 = (int)TFLITE_GPU_INFERENCE_PRIORITY_AUTO;
+        go.inference_priority3 = (int)TFLITE_GPU_INFERENCE_PRIORITY_AUTO;
+        go.experimental_flags = (int64)TFLITE_GPU_EXPERIMENTAL_FLAGS_ENABLE_QUANT;
+        go.max_delegated_partitions = 1;
+        x = _tflite_call_create(create, (*void)&go);
+#endif
+    }
+    if (x == null) {
+        String_appendf(why, "%s returned null", _tflite_delegate_create_name(d));
+        return null;
+    }
+    it._delegate_free = del;
+    return x;
+}
+
+void _tflite_free_delegate(*TfliteInterpreter self) {
+    if (self._delegate == null) return;
+    if (self.delegate == TFLITE_XNNPACK) TfLiteXNNPackDelegateDelete(self._delegate);
+    else if (self._delegate_free != null) _tflite_call_delete(self._delegate_free, self._delegate);
+    self._delegate = null;
+    self._delegate_free = null;
+}
+
+// --- interpreters ---
+
+void _tflite_tensors_free(List<TfliteTensor>* l) {
+    for (i in 0..l.size) {
+        String_free(&l.data[i].name);
+        List_free(&l.data[i].shape);
+        List_free(&l.data[i].signature);
+    }
+    List_free(l);
+}
+
+// Reads a tensor's name, type, shapes, quantization and data pointer into t.
+void _tflite_read(*TfLiteTensor h, *TfliteTensor t) {
+    t.handle = h;
+    String_clear(&t.name);
+    t.shape.size = 0;
+    t.signature.size = 0;
+    if (h == null) return;
+    string name = TfLiteTensorName(h);
+    if (name != null) String_append(&t.name, name);
+    t.type = (int)TfLiteTensorType(h);
+    int rank = TfLiteTensorNumDims(h);
+    uint64 count = 1;
+    for (i in 0..rank) {
+        int d = TfLiteTensorDim(h, i);
+        List_push(&t.shape, d);
+        if (d > 0) count = count * (uint64)d;
+        else count = 0;
+    }
+    int srank = -1;
+    if ((int)TfLiteOpaqueTensorGetNumDimsSignature((*TfLiteOpaqueTensor)h, &srank) != 0 || srank != rank) srank = -1;
+    for (i in 0..rank) {
+        int d = t.shape.data[i];
+        if (srank == rank) {
+            int s = 0;
+            if ((int)TfLiteOpaqueTensorGetDimSignature((*TfLiteOpaqueTensor)h, i, &s) == 0) d = s;
+        }
+        List_push(&t.signature, d);
+    }
+    t.count = count;
+    t.bytes = TfLiteTensorByteSize(h);
+    t.data = TfLiteTensorData(h);
+    TfLiteQuantizationParams q = TfLiteTensorQuantizationParams(h);
+    t.scale = q.scale;
+    t.zero_point = q.zero_point;
+}
+
+void _tflite_refresh(*TfliteInterpreter self, bool inputs, bool outputs) {
+    if (inputs) {
+        for (i in 0..self.inputs.size) _tflite_read(TfLiteInterpreterGetInputTensor(self.handle, i), &self.inputs.data[i]);
+    }
+    if (outputs) {
+        for (i in 0..self.outputs.size) _tflite_read(TfLiteInterpreterGetOutputTensor(self.handle, i), &self.outputs.data[i]);
+    }
+}
+
+// An interpreter for the model with options, or null with the reason in the log.
+*TfLiteInterpreter _tflite_create(*TfLiteModel m, *TfliteOptions o, *TfLiteDelegate d) {
+    *TfLiteInterpreterOptions io = TfLiteInterpreterOptionsCreate();
+    defer TfLiteInterpreterOptionsDelete(io);
+    TfLiteInterpreterOptionsSetErrorReporter(io, (*void)_tflite_report, null);
+    if (o != null && o.threads > 0) TfLiteInterpreterOptionsSetNumThreads(io, o.threads);
+    if (d != null) TfLiteInterpreterOptionsAddDelegate(io, d);
+    return TfLiteInterpreterCreate(m, io);
+}
+
+// The first delegate of the platform's GPU ones that is available, else the CPU.
+int _tflite_auto_delegate() {
+    if (tflite_has_delegate(TFLITE_GPU)) return TFLITE_GPU;
+    return TFLITE_CPU;
+}
+
+// Makes an interpreter for the model, with opts (null for the defaults: the CPU).
+// The model may be released afterwards.
+Result<TfliteInterpreter, string> tflite_interpreter(*TfliteModel model, *TfliteOptions opts) {
+    if (model == null || model.handle == null) return Err<TfliteInterpreter, string>(_tflite_fail("tflite: the model is released"));
+    TfliteOptions o;
+    if (opts != null) o = *opts;
+    TfliteInterpreter it;
+    int d = o.delegate;
+    if (d == TFLITE_AUTO) d = _tflite_auto_delegate();
+    if (d != TFLITE_CPU && d != TFLITE_XNNPACK && d != TFLITE_GPU && d != TFLITE_COREML) {
+        return Err<TfliteInterpreter, string>(_tflite_fail("tflite: unknown delegate"));
+    }
+    String_clear(&_tflite_log);
+    if (d != TFLITE_CPU) {
+        String why;
+        defer String_free(&why);
+        *TfLiteDelegate x = _tflite_make_delegate(&o, d, &it, &why);
+        if (x == null) {
+            if (!o.fallback) {
+                String_clear(&_tflite_err);
+                String_appendf(&_tflite_err, "tflite: no %s delegate: %s", tflite_delegate_name(d), (string)why.data);
+                return Err<TfliteInterpreter, string>(_tflite_err.data);
+            }
+            d = TFLITE_CPU;
+        } else {
+            it._delegate = x;
+            it.delegate = d;
+        }
+    }
+    it.handle = _tflite_create(model.handle, &o, it._delegate);
+    if (it.handle == null && it._delegate != null && o.fallback) {
+        _tflite_free_delegate(&it);
+        it.delegate = TFLITE_CPU;
+        String_clear(&_tflite_log);
+        it.handle = _tflite_create(model.handle, &o, null);
+    }
+    if (it.handle == null) {
+        string e = null;
+        if (it._delegate != null) {
+            String what;
+            String_appendf(&what, "tflite: cannot apply the %s delegate", tflite_delegate_name(it.delegate));
+            e = _tflite_fail(what.data);
+            String_free(&what);
+        } else {
+            e = _tflite_fail("tflite: cannot create the interpreter");
+        }
+        _tflite_free_delegate(&it);
+        return Err<TfliteInterpreter, string>(e);
+    }
+    if (model.blob != null) {
+        model.blob.refs++;
+        it._blob = model.blob;
+    }
+    if ((int)TfLiteInterpreterAllocateTensors(it.handle) != 0) {
+        string e = _tflite_fail("tflite: cannot allocate tensors");
+        it.release();
+        return Err<TfliteInterpreter, string>(e);
+    }
+    int n = TfLiteInterpreterGetInputTensorCount(it.handle);
+    for (i in 0..n) {
+        TfliteTensor t;
+        List_push(&it.inputs, t);
+    }
+    n = TfLiteInterpreterGetOutputTensorCount(it.handle);
+    for (i in 0..n) {
+        TfliteTensor t;
+        List_push(&it.outputs, t);
+    }
+    _tflite_refresh(&it, true, true);
+    return Ok<TfliteInterpreter, string>(it);
+}
+
+// Loads a .tflite file and makes an interpreter for it (opts may be null).
+Result<TfliteInterpreter, string> tflite_load(string path, *TfliteOptions opts) {
+    TfliteModel m = tflite_model(path)?;
+    Result<TfliteInterpreter, string> r = tflite_interpreter(&m, opts);
+    m.release();
+    return r;
+}
+
+void TfliteInterpreter_release(*TfliteInterpreter self) {
+    if (self.handle != null) TfLiteInterpreterDelete(self.handle);
+    self.handle = null;
+    _tflite_free_delegate(self);
+    _tflite_blob_drop(self._blob);
+    _tflite_tensors_free(&self.inputs);
+    _tflite_tensors_free(&self.outputs);
+    *self = TfliteInterpreter{};
+}
+
+int TfliteInterpreter_input_count(*TfliteInterpreter self) {
+    return self.inputs.size;
+}
+
+int TfliteInterpreter_output_count(*TfliteInterpreter self) {
+    return self.outputs.size;
+}
+
+// The i-th input; null when i is out of range.
+*TfliteTensor TfliteInterpreter_input(*TfliteInterpreter self, int i) {
+    if (i < 0 || i >= self.inputs.size) return null;
+    return &self.inputs.data[i];
+}
+
+// The i-th output, as the last invoke() left it; null when i is out of range.
+*TfliteTensor TfliteInterpreter_output(*TfliteInterpreter self, int i) {
+    if (i < 0 || i >= self.outputs.size) return null;
+    return &self.outputs.data[i];
+}
+
+int _tflite_find(List<TfliteTensor>* l, string name) {
+    if (name == null) return -1;
+    for (i in 0..l.size) {
+        if (strcmp(l.data[i].name.data, name) == 0) return i;
+    }
+    return -1;
+}
+
+// The index of the input with this name, or -1.
+int TfliteInterpreter_input_index(*TfliteInterpreter self, string name) {
+    return _tflite_find(&self.inputs, name);
+}
+
+int TfliteInterpreter_output_index(*TfliteInterpreter self, string name) {
+    return _tflite_find(&self.outputs, name);
+}
+
+string _tflite_bad_index(*TfliteInterpreter self, int i) {
+    String_clear(&_tflite_err);
+    if (self.handle == null) String_append(&_tflite_err, "tflite: the interpreter is released");
+    else String_appendf(&_tflite_err, "tflite: no input %d (the model has %d)", i, self.inputs.size);
+    return _tflite_err.data;
+}
+
+// Whether shape fits the input's signature; else an error naming both.
+string _tflite_check_shape(*TfliteTensor t, *int shape, int rank) {
+    bool ok = rank == t.signature.size && (rank == 0 || shape != null);
+    if (ok) {
+        for (k in 0..rank) {
+            int s = t.signature.data[k];
+            if (shape[k] < 0 || (s >= 0 && shape[k] != s)) ok = false;
+        }
+    }
+    if (ok) return null;
+    String_clear(&_tflite_err);
+    String_appendf(&_tflite_err, "tflite: input '%s' cannot have shape ", (string)t.name.data);
+    if (rank >= 0 && (rank == 0 || shape != null)) tflite_shape_text(shape, rank, &_tflite_err);
+    else String_append(&_tflite_err, "(none)");
+    String_append(&_tflite_err, ", the model wants ");
+    tflite_shape_text(t.signature.data, t.signature.size, &_tflite_err);
+    return _tflite_err.data;
+}
+
+// Resizes input i to shape (rank dimensions), which must keep the model's fixed
+// dimensions (only the -1 ones of its signature can change), and reallocates the
+// tensors. Every input's and output's data pointer may change.
+Result<int, string> TfliteInterpreter_resize_input(*TfliteInterpreter self, int i, *int shape, int rank) {
+    if (self.handle == null || i < 0 || i >= self.inputs.size) return Err<int, string>(_tflite_bad_index(self, i));
+    *TfliteTensor t = &self.inputs.data[i];
+    string e = _tflite_check_shape(t, shape, rank);
+    if (e != null) return Err<int, string>(e);
+    String_clear(&_tflite_log);
+    int one = 0;
+    *int dims = shape;
+    if (dims == null) dims = &one;
+    if ((int)TfLiteInterpreterResizeInputTensor(self.handle, i, dims, rank) != 0) return Err<int, string>(_tflite_fail("tflite: cannot resize the input"));
+    if ((int)TfLiteInterpreterAllocateTensors(self.handle) != 0) return Err<int, string>(_tflite_fail("tflite: cannot allocate tensors"));
+    _tflite_refresh(self, true, true);
+    return Ok<int, string>(0);
+}
+
+bool _tflite_same_shape(*TfliteTensor t, *int shape, int rank) {
+    if (t.shape.size != rank) return false;
+    for (k in 0..rank) {
+        if (t.shape.data[k] != shape[k]) return false;
+    }
+    return true;
+}
+
+// Copies data, of the given element type and shape, into input i. The type must
+// be the input's; the shape must fit its signature, and the input is resized when
+// it differs from the current one.
+Result<int, string> TfliteInterpreter_set_input(*TfliteInterpreter self, int i, int type, *void data, *int shape, int rank) {
+    if (self.handle == null || i < 0 || i >= self.inputs.size) return Err<int, string>(_tflite_bad_index(self, i));
+    *TfliteTensor t = &self.inputs.data[i];
+    if (type != t.type) {
+        String_clear(&_tflite_err);
+        String_appendf(&_tflite_err, "tflite: input '%s' is %s, the model wants %s", (string)t.name.data,
+            tflite_type_name(type), tflite_type_name(t.type));
+        return Err<int, string>(_tflite_err.data);
+    }
+    string e = _tflite_check_shape(t, shape, rank);
+    if (e != null) return Err<int, string>(e);
+    if (!_tflite_same_shape(t, shape, rank)) {
+        self.resize_input(i, shape, rank)?;
+        t = &self.inputs.data[i];
+    }
+    if (data == null) return Err<int, string>(_tflite_fail("tflite: no input data"));
+    String_clear(&_tflite_log);
+    if ((int)TfLiteTensorCopyFromBuffer(t.handle, data, t.bytes) != 0) return Err<int, string>(_tflite_fail("tflite: cannot copy the input"));
+    return Ok<int, string>(0);
+}
+
+Result<int, string> TfliteInterpreter_set_f32(*TfliteInterpreter self, int i, *float data, *int shape, int rank) {
+    return self.set_input(i, TFLITE_FLOAT32, (*void)data, shape, rank);
+}
+
+Result<int, string> TfliteInterpreter_set_f16(*TfliteInterpreter self, int i, *uint16 data, *int shape, int rank) {
+    return self.set_input(i, TFLITE_FLOAT16, (*void)data, shape, rank);
+}
+
+Result<int, string> TfliteInterpreter_set_i8(*TfliteInterpreter self, int i, *int8 data, *int shape, int rank) {
+    return self.set_input(i, TFLITE_INT8, (*void)data, shape, rank);
+}
+
+Result<int, string> TfliteInterpreter_set_u8(*TfliteInterpreter self, int i, *uint8 data, *int shape, int rank) {
+    return self.set_input(i, TFLITE_UINT8, (*void)data, shape, rank);
+}
+
+Result<int, string> TfliteInterpreter_set_i32(*TfliteInterpreter self, int i, *int data, *int shape, int rank) {
+    return self.set_input(i, TFLITE_INT32, (*void)data, shape, rank);
+}
+
+Result<int, string> TfliteInterpreter_set_i64(*TfliteInterpreter self, int i, *int64 data, *int shape, int rank) {
+    return self.set_input(i, TFLITE_INT64, (*void)data, shape, rank);
+}
+
+// Fills input i from float values, converted to its type: copied for float32,
+// rounded for float16, and quantized with the input's scale and zero point for
+// int8, uint8 and int16. The shape is checked and applied as in set_input.
+Result<int, string> TfliteInterpreter_set_float(*TfliteInterpreter self, int i, *float data, *int shape, int rank) {
+    if (self.handle == null || i < 0 || i >= self.inputs.size) return Err<int, string>(_tflite_bad_index(self, i));
+    *TfliteTensor t = &self.inputs.data[i];
+    int type = t.type;
+    if (type == TFLITE_FLOAT32) return self.set_input(i, type, (*void)data, shape, rank);
+    bool quant = type == TFLITE_INT8 || type == TFLITE_UINT8 || type == TFLITE_INT16;
+    if (type != TFLITE_FLOAT16 && !quant) {
+        String_clear(&_tflite_err);
+        String_appendf(&_tflite_err, "tflite: input '%s' is %s, which floats cannot fill", (string)t.name.data, tflite_type_name(type));
+        return Err<int, string>(_tflite_err.data);
+    }
+    if (quant && t.scale == 0.0) {
+        String_clear(&_tflite_err);
+        String_appendf(&_tflite_err, "tflite: input '%s' is %s without quantization parameters", (string)t.name.data, tflite_type_name(type));
+        return Err<int, string>(_tflite_err.data);
+    }
+    string e = _tflite_check_shape(t, shape, rank);
+    if (e != null) return Err<int, string>(e);
+    if (data == null) return Err<int, string>(_tflite_fail("tflite: no input data"));
+    uint64 n = 1;
+    for (k in 0..rank) n = n * (uint64)shape[k];
+    *uint8 buf = alloc<uint8>((int64)n * (int64)tflite_type_size(type) + 1);
+    defer free(buf);
+    for (k in 0..n) {
+        if (type == TFLITE_FLOAT16) {
+            ((*uint16)buf)[k] = tflite_f32_to_f16(data[k]);
+        } else {
+            int q = tflite_quantize(data[k], t.scale, t.zero_point, type);
+            if (type == TFLITE_INT8) ((*int8)buf)[k] = (int8)q;
+            else if (type == TFLITE_UINT8) buf[k] = (uint8)q;
+            else ((*int16)buf)[k] = (int16)q;
+        }
+    }
+    return self.set_input(i, type, (*void)buf, shape, rank);
+}
+
+// Runs the model on the inputs as they are set.
+Result<int, string> TfliteInterpreter_invoke(*TfliteInterpreter self) {
+    if (self.handle == null) return Err<int, string>(_tflite_fail("tflite: the interpreter is released"));
+    String_clear(&_tflite_log);
+    if ((int)TfLiteInterpreterInvoke(self.handle) != 0) return Err<int, string>(_tflite_fail("tflite: invoke failed"));
+    _tflite_refresh(self, false, true);
+    return Ok<int, string>(0);
+}
+
+// --- tensors ---
+
+int TfliteTensor_rank(*TfliteTensor self) {
+    return self.shape.size;
+}
+
+// The i-th dimension, or 0 when i is out of range.
+int TfliteTensor_dim(*TfliteTensor self, int i) {
+    if (i < 0 || i >= self.shape.size) return 0;
+    return self.shape.data[i];
+}
+
+// The number of elements.
+uint64 TfliteTensor_len(*TfliteTensor self) {
+    return self.count;
+}
+
+// True when the tensor holds quantized integers (a nonzero scale).
+bool TfliteTensor_quantized(*TfliteTensor self) {
+    return self.scale != 0.0;
+}
+
+// The elements as the given C type, or null when the tensor holds another type.
+*float TfliteTensor_f32(*TfliteTensor self) {
+    if (self.type != TFLITE_FLOAT32) return null;
+    return (*float)self.data;
+}
+
+*uint16 TfliteTensor_f16(*TfliteTensor self) {
+    if (self.type != TFLITE_FLOAT16) return null;
+    return (*uint16)self.data;
+}
+
+*int8 TfliteTensor_i8(*TfliteTensor self) {
+    if (self.type != TFLITE_INT8) return null;
+    return (*int8)self.data;
+}
+
+*uint8 TfliteTensor_u8(*TfliteTensor self) {
+    if (self.type != TFLITE_UINT8) return null;
+    return (*uint8)self.data;
+}
+
+*int TfliteTensor_i32(*TfliteTensor self) {
+    if (self.type != TFLITE_INT32) return null;
+    return (*int)self.data;
+}
+
+*int64 TfliteTensor_i64(*TfliteTensor self) {
+    if (self.type != TFLITE_INT64) return null;
+    return (*int64)self.data;
+}
+
+// Element i as a double, whatever the numeric type, as stored (not dequantized);
+// 0 when i is out of range.
+double TfliteTensor_at(*TfliteTensor self, uint64 i) {
+    if (i >= self.count || self.data == null) return 0.0;
+    int t = self.type;
+    if (t == TFLITE_FLOAT32) return (double)((*float)self.data)[i];
+    if (t == TFLITE_FLOAT64) return ((*double)self.data)[i];
+    if (t == TFLITE_FLOAT16) return (double)tflite_f16_to_f32(((*uint16)self.data)[i]);
+    if (t == TFLITE_BFLOAT16) {
+        uint32 x = (uint32)((*uint16)self.data)[i] << 16;
+        float f = *(*float)&x;
+        return (double)f;
+    }
+    if (t == TFLITE_UINT8 || t == TFLITE_BOOL) return (double)((*uint8)self.data)[i];
+    if (t == TFLITE_INT8) return (double)((*int8)self.data)[i];
+    if (t == TFLITE_UINT16) return (double)((*uint16)self.data)[i];
+    if (t == TFLITE_INT16) return (double)((*int16)self.data)[i];
+    if (t == TFLITE_INT32) return (double)((*int)self.data)[i];
+    if (t == TFLITE_UINT32) return (double)((*uint32)self.data)[i];
+    if (t == TFLITE_INT64) return (double)((*int64)self.data)[i];
+    if (t == TFLITE_UINT64) return (double)((*uint64)self.data)[i];
+    return 0.0;
+}
+
+// Element i as the real value it stands for: dequantized when the tensor is
+// quantized, else as at().
+double TfliteTensor_value(*TfliteTensor self, uint64 i) {
+    double v = self.at(i);
+    if (self.scale == 0.0 || self.type == TFLITE_FLOAT32 || self.type == TFLITE_FLOAT16 || self.type == TFLITE_FLOAT64) return v;
+    return (v - (double)self.zero_point) * (double)self.scale;
+}
+
+// A new buffer (to free) with every element's value() as a float.
+*float TfliteTensor_floats(*TfliteTensor self) {
+    *float out = alloc<float>((int64)self.count + 1);
+    for (i in 0..self.count) out[i] = (float)self.value(i);
+    return out;
+}
+
+// The index of the largest element.
+uint64 TfliteTensor_argmax(*TfliteTensor self) {
+    uint64 best = 0;
+    for (i in 1..self.count) {
+        if (self.at(i) > self.at(best)) best = i;
+    }
+    return best;
+}

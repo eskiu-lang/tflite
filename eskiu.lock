@@ -1,0 +1,3 @@
+# eskiu.lock: written by eskiuc (eskiuc fetch updates it); do not edit.
+gpu	git	https://github.com/eskiu-lang/gpu	v0.1.0	5fd70e971d8285e57ffcdb0d0d0dfc208cb29e4a
+tflite	root	.
