@@ -81,7 +81,8 @@ jobs:
       - name: Tests
         run: |
           export PATH="$HOME/eskiu/bin:$PATH"
-          # MinGW links against the DLL itself; Windows loads it from beside the program.
+          # MinGW links against the DLL itself; Windows finds it beside the program or on PATH.
+          export PATH="$HOME/tflite/lib:$PATH"
           mkdir -p build/tests
           cp $HOME/tflite/lib/*.dll build/tests/
           CC=gcc eskiuc test -L$HOME/tflite/lib
