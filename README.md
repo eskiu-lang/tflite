@@ -223,7 +223,7 @@ $ curl -LO https://storage.googleapis.com/download.tensorflow.org/models/tflite_
 $ tar xzf mobilenet_v2_1.0_224.tgz
 $ curl -LO https://storage.googleapis.com/download.tensorflow.org/data/ImageNetLabels.txt
 $ curl -LO https://storage.googleapis.com/download.tensorflow.org/example_images/grace_hopper.jpg
-$ eskiuc build -L$TFL/lib --link-arg=-Wl,-rpath,$TFL/lib
+$ eskiuc build
 $ build/tflite --model mobilenet_v2_1.0_224.tflite --labels ImageNetLabels.txt grace_hopper.jpg
 mobilenet_v2_1.0_224.tflite on grace_hopper.jpg (CPU, float32 NHWC), 224x224 input
  35.91%  military uniform
@@ -250,7 +250,7 @@ Apache-2.0) converted to TensorFlow Lite, as published in
 
 ```
 $ curl -LO https://raw.githubusercontent.com/feni-katharotiya/Silent-Face-Anti-Spoofing-TFLite/HEAD/Model_Encryption/matrix/converted_models/tflite_f32/2.7_80x80_MiniFASNetV2.tflite
-$ eskiuc -L$TFL/lib --link-arg=-Wl,-rpath,$TFL/lib examples/minifasnet.esk -o build/minifasnet
+$ eskiuc examples/minifasnet.esk -o build/minifasnet
 $ build/minifasnet 2.7_80x80_MiniFASNetV2.tflite image_T1.png 106 147 313 360
 box 106 147 313 360, crop 0 7 479 499, logits -4.364262 4.530829 -0.169430
 real (real 99.09%, CPU)
@@ -296,9 +296,21 @@ formula, Google's LiteRT releases ship `TensorFlowLiteC` for iOS only, and the
 LiteRT API, not `libtensorflowlite_c`. The package uses the libraries from the Unity
 package of [asus4/tf-lite-unity-sample](https://github.com/asus4/tf-lite-unity-sample)
 (Apache-2.0), which builds TensorFlow's own `tensorflow/lite/c:tensorflowlite_c` target
-with Bazel for each platform. [`tools/get_tflite.sh`](tools/get_tflite.sh) downloads that
-release (TensorFlow 2.21.0, 55 MB), checks its SHA-256, and copies this platform's files
-into `DIR/lib`:
+with Bazel for each platform.
+
+On macOS and Linux there is nothing to install. The package's `eskiu.toml` names that
+release (TensorFlow 2.21.0, 55 MB): the first build that links it (`eskiuc build`, `run`,
+`test`) downloads it once, checks its SHA-256 and keeps it in `~/.eskiu/native`, and every
+build links against this platform's directory of it with no `-L`. In an Eskiu package
+(Eskiu 0.12 or newer):
+
+```bash
+eskiuc add tflite --git https://github.com/eskiu-lang/tflite --rev v0.1.0
+eskiuc build
+```
+
+On Windows, and to put the libraries somewhere else, [`tools/get_tflite.sh`](tools/get_tflite.sh)
+downloads the same release, checks it, and copies this platform's files into `DIR/lib`:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/eskiu-lang/tflite/v0.1.0/tools/get_tflite.sh | sh -s -- ~/tflite
@@ -312,14 +324,7 @@ export TFL=~/tflite
 | Linux arm64 | `libtensorflowlite_c.so` |
 | Windows x86-64 | `tensorflowlite_c.dll` (needs the Visual C++ 2015-2022 runtime) |
 
-On Windows, run it from an MSYS2 shell. Then, in an Eskiu package (Eskiu 0.12 or newer):
-
-```bash
-eskiuc add tflite --git https://github.com/eskiu-lang/tflite --rev v0.1.0
-eskiuc build -L$TFL/lib --link-arg=-Wl,-rpath,$TFL/lib     # macOS and Linux
-```
-
-On Windows (MinGW), `-L` the directory that holds `tensorflowlite_c.dll`, which MinGW
+On Windows, run it from an MSYS2 shell, then `-L` the directory that holds `tensorflowlite_c.dll`, which MinGW
 links against directly (the file must keep that name, the one the DLL gives itself), and put the DLL next to the executable.
 
 TensorFlow also documents a CMake build of the C library (`tensorflow/lite/c` at the

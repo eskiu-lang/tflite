@@ -21,11 +21,12 @@ jobs:
       - name: Layout check
         run: CC=cc ESKIUC=eskiuc tools/layout_check.sh $TFL/lib
       - name: Tests
-        run: eskiuc test -L$TFL/lib --link-arg=-Wl,-rpath,$TFL/lib
+        # eskiuc downloads the archive the manifest names; TFL above is for the layout check.
+        run: eskiuc test
       - name: Examples
         run: |
           mkdir -p build
-          for f in examples/*.esk; do eskiuc -L$TFL/lib --link-arg=-Wl,-rpath,$TFL/lib "$f" -o build/$(basename "$f" .esk); done
+          for f in examples/*.esk; do eskiuc "$f" -o build/$(basename "$f" .esk); done
           build/classify --delegate auto | tee build/classify.txt
           grep -q "blue" build/classify.txt
 
@@ -44,11 +45,12 @@ jobs:
       - name: Layout check
         run: CC=cc ESKIUC=eskiuc tools/layout_check.sh $TFL/lib
       - name: Tests
-        run: eskiuc test -L$TFL/lib --link-arg=-Wl,-rpath,$TFL/lib
+        # eskiuc downloads the archive the manifest names; TFL above is for the layout check.
+        run: eskiuc test
       - name: Examples
         run: |
           mkdir -p build
-          for f in examples/*.esk; do eskiuc -L$TFL/lib --link-arg=-Wl,-rpath,$TFL/lib "$f" -o build/$(basename "$f" .esk); done
+          for f in examples/*.esk; do eskiuc "$f" -o build/$(basename "$f" .esk); done
           build/classify --delegate auto | tee build/classify.txt
           grep -q "blue" build/classify.txt
 
