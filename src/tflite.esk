@@ -124,7 +124,6 @@ struct TfliteInterpreter {
     *TfLiteDelegate _delegate;
     *void _delegate_free;
     *_TfliteBlob _blob;
-    *TfLiteModel _own_model;
     List<TfliteTensor> inputs;
     List<TfliteTensor> outputs;
 }
