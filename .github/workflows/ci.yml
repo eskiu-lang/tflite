@@ -84,7 +84,6 @@ jobs:
           # MinGW links against the DLL itself; Windows loads it from beside the program.
           mkdir -p build/tests
           cp $HOME/tflite/lib/*.dll build/tests/
-          CC=gcc eskiuc -L$HOME/tflite/lib tests/delegates.esk -o build/tests/d1.exe; ls build/tests; objdump -p build/tests/d1.exe | grep "DLL Name"; set +e; build/tests/d1.exe; echo "exit $?"; set -e
           CC=gcc eskiuc test -L$HOME/tflite/lib
       - name: Examples
         run: |
