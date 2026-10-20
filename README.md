@@ -273,6 +273,21 @@ converter such as [onnx2tf](https://github.com/PINTO0309/onnx2tf) (`onnx2tf -i
 best_model.onnx`) can make an NHWC `.tflite` of it (not tried here), which would take a
 128x128 RGB crop in 0..1 (`tflite_format_unit()`) and give two logits.
 
+## Platforms
+
+| Platform | Checked |
+|---|---|
+| macOS arm64 | CI |
+| Linux x86-64 | CI |
+| Windows x86-64 (MinGW) | CI |
+| iOS, Android | not yet |
+| WebAssembly | not yet |
+
+The bindings follow the 64-bit prebuilt libraries that `tools/get_tflite.sh` downloads, so
+building `<tflite>` for a phone, for WebAssembly or for a 32-bit target stops with an
+`#error`. TensorFlow Lite has iOS and Android builds of its C library; supporting them here
+is planned. In a browser, TensorFlow Lite runs from JavaScript instead.
+
 ## Install
 
 Google publishes no desktop build of the TensorFlow Lite C library: Homebrew has no
