@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: ~/tflite
+          key: tflite-linux-${{ hashFiles('tools/get_tflite.sh') }}
+      - name: Install Eskiu and TensorFlow Lite
+        run: |
+          curl -fsSL https://eskiu-lang.org/install.sh | ESKIU_PREFIX=$HOME/.eskiu sh
+          echo "$HOME/.eskiu/bin" >> $GITHUB_PATH
+          echo "TFL=$(tools/get_tflite.sh $HOME/tflite)" >> $GITHUB_ENV
+      - name: Layout check
+        run: CC=cc ESKIUC=eskiuc tools/layout_check.sh $TFL/lib
+      - name: Tests
+        run: eskiuc test -L$TFL/lib --link-arg=-Wl,-rpath,$TFL/lib
+      - name: Examples
+        run: |
+          mkdir -p build
+          for f in examples/*.esk; do eskiuc -L$TFL/lib --link-arg=-Wl,-rpath,$TFL/lib "$f" -o build/$(basename "$f" .esk); done
+          build/classify --delegate auto | tee build/classify.txt
+          grep -q "blue" build/classify.txt
+
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: ~/tflite
+          key: tflite-macos-${{ hashFiles('tools/get_tflite.sh') }}
+      - name: Install Eskiu and TensorFlow Lite
+        run: |
+          brew install eskiu-lang/eskiu/eskiu
+          echo "TFL=$(tools/get_tflite.sh $HOME/tflite)" >> $GITHUB_ENV
+      - name: Layout check
+        run: CC=cc ESKIUC=eskiuc tools/layout_check.sh $TFL/lib
+      - name: Tests
+        run: eskiuc test -L$TFL/lib --link-arg=-Wl,-rpath,$TFL/lib
+      - name: Examples
+        run: |
+          mkdir -p build
+          for f in examples/*.esk; do eskiuc -L$TFL/lib --link-arg=-Wl,-rpath,$TFL/lib "$f" -o build/$(basename "$f" .esk); done
+          build/classify --delegate auto | tee build/classify.txt
+          grep -q "blue" build/classify.txt
+
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          install: mingw-w64-x86_64-gcc unzip diffutils tar
+      - uses: actions/cache@v4
+        with:
+          path: ~/tflite
+          key: tflite-windows-${{ hashFiles('tools/get_tflite.sh') }}
+      - name: Install Eskiu and TensorFlow Lite
+        run: |
+          curl -fsSL -o eskiu.zip https://github.com/eskiu-lang/eskiu/releases/latest/download/eskiuc-windows-x86_64.zip
+          # The archive's paths use backslashes; unzip extracts it and exits with 1 (a warning).
+          unzip -q eskiu.zip -d $HOME/eskiu || [ $? -eq 1 ]
+          test -x $HOME/eskiu/bin/eskiuc.exe
+          tools/get_tflite.sh $HOME/tflite
+      - name: Layout check
+        run: |
+          export PATH="$HOME/eskiu/bin:$PATH"
+          CC=gcc ESKIUC=eskiuc tools/layout_check.sh $HOME/tflite/lib
+      - name: Tests
+        run: |
+          export PATH="$HOME/eskiu/bin:$PATH"
+          # MinGW links against the DLL itself; Windows loads it from beside the program.
+          mkdir -p build/tests
+          cp $HOME/tflite/lib/*.dll build/tests/
+          CC=gcc eskiuc test -L$HOME/tflite/lib
+      - name: Examples
+        run: |
+          export PATH="$HOME/eskiu/bin:$PATH"
+          cp $HOME/tflite/lib/*.dll build/
+          for f in examples/*.esk; do CC=gcc eskiuc -L$HOME/tflite/lib "$f" -o build/$(basename "$f" .esk).exe; done
+          build/classify.exe --delegate auto | tee build/classify.txt
+          grep -q "blue" build/classify.txt

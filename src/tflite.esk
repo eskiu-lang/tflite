@@ -136,6 +136,13 @@ String _tflite_log;
 void _tflite_report(*void user, string format, va_list args) {
     char[1024] buf;
     vsnprintf(&buf[0], 1024, format, args);
+    // Messages are joined with "; ", without their final period or newline.
+    int n = (int)strlen((string)&buf[0]);
+    while (n > 0 && (buf[n - 1] == '.' || buf[n - 1] == '\n')) {
+        n--;
+        buf[n] = (char)0;
+    }
+    if (n == 0) return;
     if (_tflite_log.len > 0) String_append(&_tflite_log, "; ");
     String_append(&_tflite_log, (string)&buf[0]);
 }
@@ -469,8 +476,12 @@ void _tflite_lib_dir(String* out) {
         String_append(&path, dir.data);
 #ifdef __APPLE__
         String_append(&path, "libtensorflowlite_c.dylib");
-#else
+#endif
+#ifdef __linux__
         String_append(&path, "libtensorflowlite_c.so");
+#endif
+#ifdef _WIN32
+        String_append(&path, "libtensorflowlite_c.dll");
 #endif
         lib = _tflite_dlopen(path.data);
         if (lib == null || _tflite_dlsym(lib, "TfLiteCoreMlDelegateCreate") == null) {
