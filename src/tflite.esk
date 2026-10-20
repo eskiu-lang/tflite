@@ -492,7 +492,7 @@ void _tflite_lib_dir(String* out) {
         // Core ML is part of libtensorflowlite_c in the builds that have it.
         String path;
         defer String_free(&path);
-        String_append(&path, dir.data);
+        if (dir.len > 0) String_append(&path, dir.data);
 #ifdef __APPLE__
         String_append(&path, "libtensorflowlite_c.dylib");
 #endif
@@ -516,7 +516,7 @@ void _tflite_lib_dir(String* out) {
     }
     String path;
     defer String_free(&path);
-    String_append(&path, dir.data);
+    if (dir.len > 0) String_append(&path, dir.data);
     String_append(&path, file);
     lib = _tflite_dlopen(path.data);
     if (lib == null) lib = _tflite_dlopen(file);
