@@ -157,7 +157,8 @@ What was verified with the libraries below (TensorFlow Lite 2.21.0):
   thread, with the same top five. Models with dynamic tensors are refused by the delegate
   (and run on the CPU with `fallback`).
 - **OpenCL/OpenGL** on Linux x86-64: the delegate library is included and loaded at run
-  time, but it has not been tried on a Linux machine with a GPU. Without a usable GPU the
+  time; it needs the OpenGL ES and EGL libraries (without them it does not load and is
+  reported missing), and it has not been tried on a Linux machine with a GPU. Without a usable GPU the
   delegate cannot be applied, and `fallback` runs the model on the CPU.
 - **Core ML**: TensorFlow builds its Core ML delegate for iOS only, and no desktop library
   has it, so `TFLITE_COREML` reports it missing unless `delegate_path` names a library that
