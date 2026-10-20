@@ -132,9 +132,29 @@ String _tflite_err;
 String _tflite_log;
 
 // TensorFlow Lite's error reporter: collects the messages of the current call.
-void _tflite_report(*void user, string format, va_list args) {
+// A C va_list argument arrives as a pointer on every target here (the char* itself
+// on Windows and Apple arm64, the address of the structure on x86-64 and AArch64
+// Linux), and is passed on as it came. An Eskiu va_list parameter would be the
+// structure itself, so the callback takes a *void.
+#ifdef _WIN32
+extern int _vsnprintf(*char buf, uint64 n, string format, *void args);
+#else
+extern int vasprintf(*string out, string format, *void args);
+#endif
+
+void _tflite_report(*void user, string format, *void args) {
     char[1024] buf;
-    vsnprintf(&buf[0], 1024, format, args);
+#ifdef _WIN32
+    _vsnprintf(&buf[0], 1023, format, args);
+#else
+    string text = null;
+    if (vasprintf(&text, format, args) >= 0 && text != null) {
+        int len = (int)strlen(text);
+        if (len > 1023) len = 1023;
+        memcpy((*void)&buf[0], (*void)text, (int64)len);
+        free((*void)text);
+    }
+#endif
     // Messages are joined with "; ", without their final period or newline.
     int n = (int)strlen((string)&buf[0]);
     while (n > 0 && (buf[n - 1] == '.' || buf[n - 1] == '\n')) {
