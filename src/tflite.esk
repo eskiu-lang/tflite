@@ -500,7 +500,7 @@ void _tflite_lib_dir(String* out) {
         String_append(&path, "libtensorflowlite_c.so");
 #endif
 #ifdef _WIN32
-        String_append(&path, "libtensorflowlite_c.dll");
+        String_append(&path, "tensorflowlite_c.dll");
 #endif
         lib = _tflite_dlopen(path.data);
         if (lib == null || _tflite_dlsym(lib, "TfLiteCoreMlDelegateCreate") == null) {

@@ -39,9 +39,17 @@ MINGW* | MSYS* | CYGWIN*)
     ;;
 esac
 
+# The Windows DLL names itself tensorflowlite_c.dll, so programs look for that file.
+target() {
+    case "$1" in
+    Windows/*) echo tensorflowlite_c.dll ;;
+    *) basename "$1" ;;
+    esac
+}
+
 have() {
     for f in $files; do
-        [ -f "$dir/lib/$(basename "$f")" ] || return 1
+        [ -f "$dir/lib/$(target "$f")" ] || return 1
     done
 }
 if have && [ -f "$dir/VERSION" ] && [ "$(cat "$dir/VERSION")" = "$version" ]; then
@@ -71,8 +79,8 @@ done
 tar xzf "$tmp/tflite.tgz" -C "$tmp" $members package/LICENSE
 mkdir -p "$dir/lib"
 for f in $files; do
-    cp "$tmp/package/Plugins/$f" "$dir/lib/"
-    chmod 755 "$dir/lib/$(basename "$f")"
+    cp "$tmp/package/Plugins/$f" "$dir/lib/$(target "$f")"
+    chmod 755 "$dir/lib/$(target "$f")"
 done
 cp "$tmp/package/LICENSE" "$dir/LICENSE"
 echo "$version" > "$dir/VERSION"

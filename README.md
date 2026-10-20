@@ -295,7 +295,7 @@ export TFL=~/tflite
 | macOS (arm64 and x86-64) | `libtensorflowlite_c.dylib`, `libtensorflowlite_metal_delegate.dylib` |
 | Linux x86-64 | `libtensorflowlite_c.so`, `libtensorflowlite_gpu_delegate.so` |
 | Linux arm64 | `libtensorflowlite_c.so` |
-| Windows x86-64 | `libtensorflowlite_c.dll` (needs the Visual C++ 2015-2022 runtime) |
+| Windows x86-64 | `tensorflowlite_c.dll` (needs the Visual C++ 2015-2022 runtime) |
 
 On Windows, run it from an MSYS2 shell. Then, in an Eskiu package (Eskiu 0.12 or newer):
 
@@ -304,8 +304,8 @@ eskiuc add tflite --git https://github.com/eskiu-lang/tflite --rev v0.1.0
 eskiuc build -L$TFL/lib --link-arg=-Wl,-rpath,$TFL/lib     # macOS and Linux
 ```
 
-On Windows (MinGW), `-L` the directory that holds `libtensorflowlite_c.dll`, which MinGW
-links against directly, and put the DLL next to the executable.
+On Windows (MinGW), `-L` the directory that holds `tensorflowlite_c.dll`, which MinGW
+links against directly (the file must keep that name, the one the DLL gives itself), and put the DLL next to the executable.
 
 TensorFlow also documents a CMake build of the C library (`tensorflow/lite/c` at the
 `v2.21.0` tag), which this package does not use or test; any `libtensorflowlite_c` of
