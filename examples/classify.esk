@@ -17,6 +17,7 @@ import <io>;
 import <mem>;
 import <fs>;
 import <string>;
+import <math>;
 import <tflite>;
 import <tflite/image>;
 import <gpu/image>;
