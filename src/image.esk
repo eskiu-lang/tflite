@@ -1,0 +1,303 @@
+// image.esk: image preprocessing for vision models (<tflite/image>).
+//
+// The functions here work on 8-bit RGBA pixels, four bytes per pixel, rows packed
+// with the top row first: what <gpu/image>'s image_load returns for PNG and JPEG
+// files, and what most decoders and cameras give. The buffers they return come
+// from alloc and go back with free.
+//
+//     *uint8 face = tflite_image_crop(img.rgba, w, h, x, y, size, size, TFLITE_BORDER_REFLECT);
+//     *uint8 small = tflite_image_resize(face, size, size, 128, 128);
+//     TfliteImageFormat f = tflite_format_unit();
+//     it.set_image(0, small, 128, 128, &f)?;
+
+import <mem>;
+import <string>;
+import <result>;
+import <tflite>;
+
+// What tflite_image_crop puts outside the image.
+const int TFLITE_BORDER_ZERO = 0;
+const int TFLITE_BORDER_CLAMP = 1;
+const int TFLITE_BORDER_REFLECT = 2;
+
+// How pixels become tensor values: value = (pixel * scale - mean[c]) / std[c],
+// with c the channel in the tensor's order (B, G, R when bgr is set) and a zero
+// std taken as 1. Layout NHWC ([1, h, w, 3], as TensorFlow Lite models take
+// images) unless nchw is set ([1, 3, h, w]). An int8 or uint8 input gets the value
+// quantized with its scale and zero point. The zero value with its default scale
+// gives 0..255 RGB in NHWC.
+struct TfliteImageFormat {
+    bool nchw;
+    bool bgr;
+    float scale = 1.0;
+    float[3] mean;
+    float[3] std;
+}
+
+// Values in 0..1.
+TfliteImageFormat tflite_format_unit() {
+    return TfliteImageFormat{scale: 1.0 / 255.0};
+}
+
+// Values in -1..1, (pixel - 127.5) / 127.5: the MobileNet and EfficientNet-Lite
+// convention. A quantized uint8 input with scale 1/128 and zero point 128 then
+// receives about the pixel values themselves.
+TfliteImageFormat tflite_format_signed() {
+    return TfliteImageFormat{scale: 1.0 / 127.5, mean: {1.0, 1.0, 1.0}};
+}
+
+// Values in 0..1, normalized with the ImageNet mean and standard deviation (RGB).
+TfliteImageFormat tflite_format_imagenet() {
+    return TfliteImageFormat{scale: 1.0 / 255.0, mean: {0.485, 0.456, 0.406}, std: {0.229, 0.224, 0.225}};
+}
+
+// Values in 0..255, as the image holds them.
+TfliteImageFormat tflite_format_raw() {
+    return TfliteImageFormat{scale: 1.0};
+}
+
+int _tflite_border(int i, int n, int border) {
+    if (i >= 0 && i < n) return i;
+    if (border == TFLITE_BORDER_ZERO) return -1;
+    if (border == TFLITE_BORDER_CLAMP || n == 1) {
+        if (i < 0) return 0;
+        return n - 1;
+    }
+    int period = 2 * (n - 1);
+    int k = i % period;
+    if (k < 0) k += period;
+    if (k >= n) k = period - k;
+    return k;
+}
+
+// The cw x ch region whose top left corner is (x, y), which may reach outside the
+// image; border says what fills the outside (zero, the nearest edge pixel, or the
+// image reflected about its edge pixels as OpenCV's BORDER_REFLECT_101).
+// null when a size is not positive.
+*uint8 tflite_image_crop(*uint8 rgba, int w, int h, int x, int y, int cw, int ch, int border) {
+    if (rgba == null || w <= 0 || h <= 0 || cw <= 0 || ch <= 0) return null;
+    *uint8 out = alloc<uint8>((int64)cw * (int64)ch * 4);
+    for (j in 0..ch) {
+        int sy = _tflite_border(y + j, h, border);
+        for (i in 0..cw) {
+            int sx = _tflite_border(x + i, w, border);
+            int64 o = ((int64)j * (int64)cw + (int64)i) * 4;
+            if (sx < 0 || sy < 0) continue;
+            int64 s = ((int64)sy * (int64)w + (int64)sx) * 4;
+            out[o] = rgba[s];
+            out[o + 1] = rgba[s + 1];
+            out[o + 2] = rgba[s + 2];
+            out[o + 3] = rgba[s + 3];
+        }
+    }
+    return out;
+}
+
+uint8 _tflite_round(float v) {
+    if (v <= 0.0) return 0;
+    if (v >= 255.0) return 255;
+    return (uint8)(int)(v + 0.5);
+}
+
+// Resizes to nw x nh with bilinear filtering and half-pixel centers (as ONNX
+// Resize with mode linear and half_pixel, TensorFlow's tf.image.resize and
+// OpenCV's INTER_LINEAR). It does not
+// average when shrinking; for that use tflite_image_resize_area.
+*uint8 tflite_image_resize(*uint8 rgba, int w, int h, int nw, int nh) {
+    if (rgba == null || w <= 0 || h <= 0 || nw <= 0 || nh <= 0) return null;
+    *uint8 out = alloc<uint8>((int64)nw * (int64)nh * 4);
+    float sx = (float)w / (float)nw;
+    float sy = (float)h / (float)nh;
+    for (j in 0..nh) {
+        float fy = ((float)j + 0.5) * sy - 0.5;
+        if (fy < 0.0) fy = 0.0;
+        int y0 = (int)fy;
+        if (y0 > h - 1) y0 = h - 1;
+        int y1 = y0 + 1;
+        if (y1 > h - 1) y1 = h - 1;
+        float wy = fy - (float)y0;
+        for (i in 0..nw) {
+            float fx = ((float)i + 0.5) * sx - 0.5;
+            if (fx < 0.0) fx = 0.0;
+            int x0 = (int)fx;
+            if (x0 > w - 1) x0 = w - 1;
+            int x1 = x0 + 1;
+            if (x1 > w - 1) x1 = w - 1;
+            float wx = fx - (float)x0;
+            int64 a = ((int64)y0 * (int64)w + (int64)x0) * 4;
+            int64 b = ((int64)y0 * (int64)w + (int64)x1) * 4;
+            int64 c = ((int64)y1 * (int64)w + (int64)x0) * 4;
+            int64 d = ((int64)y1 * (int64)w + (int64)x1) * 4;
+            int64 o = ((int64)j * (int64)nw + (int64)i) * 4;
+            for (k in 0..4) {
+                float top = (float)rgba[a + k] * (1.0 - wx) + (float)rgba[b + k] * wx;
+                float bottom = (float)rgba[c + k] * (1.0 - wx) + (float)rgba[d + k] * wx;
+                out[o + k] = _tflite_round(top * (1.0 - wy) + bottom * wy);
+            }
+        }
+    }
+    return out;
+}
+
+// For each output index along one axis, the first source index and the weights of
+// the source pixels its box covers (as OpenCV's INTER_AREA when shrinking).
+void _tflite_area_axis(int n, int nn, *int first, *int count, List<float>* weights) {
+    double scale = (double)n / (double)nn;
+    for (o in 0..nn) {
+        double lo = (double)o * scale;
+        double hi = (double)(o + 1) * scale;
+        int a = (int)lo;
+        int b = (int)hi;
+        if ((double)b < hi) b++;
+        if (b > n) b = n;
+        first[o] = a;
+        count[o] = b - a;
+        for (s in a..b) {
+            double l = lo;
+            if ((double)s > l) l = (double)s;
+            double r = hi;
+            if ((double)(s + 1) < r) r = (double)(s + 1);
+            List_push(weights, (float)((r - l) / scale));
+        }
+    }
+}
+
+// Resizes to nw x nh by averaging the source pixels each output pixel covers:
+// the better filter for shrinking. Enlarging falls back to tflite_image_resize.
+*uint8 tflite_image_resize_area(*uint8 rgba, int w, int h, int nw, int nh) {
+    if (rgba == null || w <= 0 || h <= 0 || nw <= 0 || nh <= 0) return null;
+    if (nw > w || nh > h) return tflite_image_resize(rgba, w, h, nw, nh);
+    *int xf = alloc<int>(nw);
+    *int xc = alloc<int>(nw);
+    *int yf = alloc<int>(nh);
+    *int yc = alloc<int>(nh);
+    List<float> xw;
+    List<float> yw;
+    defer {
+        free(xf);
+        free(xc);
+        free(yf);
+        free(yc);
+        List_free(&xw);
+        List_free(&yw);
+    }
+    _tflite_area_axis(w, nw, xf, xc, &xw);
+    _tflite_area_axis(h, nh, yf, yc, &yw);
+    *uint8 out = alloc<uint8>((int64)nw * (int64)nh * 4);
+    *int xstart = alloc<int>(nw + 1);
+    defer free(xstart);
+    for (i in 0..nw) xstart[i + 1] = xstart[i] + xc[i];
+    int ystart = 0;
+    for (j in 0..nh) {
+        for (i in 0..nw) {
+            float[4] acc = {0.0, 0.0, 0.0, 0.0};
+            for (dy in 0..yc[j]) {
+                float wy = yw.data[ystart + dy];
+                int64 row = (int64)(yf[j] + dy) * (int64)w;
+                for (dx in 0..xc[i]) {
+                    float wgt = wy * xw.data[xstart[i] + dx];
+                    int64 s = (row + (int64)(xf[i] + dx)) * 4;
+                    for (k in 0..4) acc[k] += (float)rgba[s + k] * wgt;
+                }
+            }
+            int64 o = ((int64)j * (int64)nw + (int64)i) * 4;
+            for (k in 0..4) out[o + k] = _tflite_round(acc[k]);
+        }
+        ystart += yc[j];
+    }
+    return out;
+}
+
+// The dimensions an image of w x h takes in a tensor of this format: [h, w, 3] or
+// [3, h, w] after the batch dimension.
+void _tflite_image_dims(*TfliteImageFormat f, int w, int h, *int dims) {
+    if (f.nchw) {
+        dims[1] = 3;
+        dims[2] = h;
+        dims[3] = w;
+    } else {
+        dims[1] = h;
+        dims[2] = w;
+        dims[3] = 3;
+    }
+}
+
+// Writes the image into item index of a tensor shaped [N, h, w, 3] (or [N, 3, h, w]
+// with nchw) of float32, float16, int8 or uint8, for batches. The tensor is
+// usually an interpreter's input, it.input(i).
+Result<int, string> tflite_image_into(*uint8 rgba, int w, int h, *TfliteImageFormat f, *TfliteTensor t, int index) {
+    if (rgba == null || f == null || t == null || t.data == null) return Err<int, string>("tflite_image_into: null argument");
+    int type = t.type;
+    if (type != TFLITE_FLOAT32 && type != TFLITE_FLOAT16 && type != TFLITE_INT8 && type != TFLITE_UINT8) {
+        String_clear(&_tflite_err);
+        String_appendf(&_tflite_err, "tflite_image_into: tensor '%s' is %s, not float32, float16, int8 or uint8",
+            (string)t.name.data, tflite_type_name(type));
+        return Err<int, string>(_tflite_err.data);
+    }
+    int[4] dims;
+    _tflite_image_dims(f, w, h, &dims[0]);
+    bool ok = t.rank() == 4 && index >= 0 && index < t.dim(0);
+    for (k in 1..4) {
+        if (ok && t.dim(k) != dims[k]) ok = false;
+    }
+    if (!ok) {
+        String_clear(&_tflite_err);
+        String_appendf(&_tflite_err, "tflite_image_into: tensor '%s' of shape ", (string)t.name.data);
+        tflite_shape_text(t.shape.data, t.shape.size, &_tflite_err);
+        String_appendf(&_tflite_err, " cannot hold item %d of a %dx%d image (%s)", index, w, h, f.nchw ? "NCHW" : "NHWC");
+        return Err<int, string>(_tflite_err.data);
+    }
+    float[3] mul;
+    float[3] add;
+    int[3] src;
+    for (c in 0..3) {
+        float sd = f.std[c];
+        if (sd == 0.0) sd = 1.0;
+        mul[c] = f.scale / sd;
+        add[c] = -f.mean[c] / sd;
+        src[c] = c;
+        if (f.bgr) src[c] = 2 - c;
+    }
+    int64 plane = (int64)w * (int64)h;
+    int64 base = (int64)index * plane * 3;
+    for (p in 0..plane) {
+        for (c in 0..3) {
+            float v = (float)rgba[p * 4 + (int64)src[c]] * mul[c] + add[c];
+            int64 o = base + p * 3 + (int64)c;
+            if (f.nchw) o = base + (int64)c * plane + p;
+            if (type == TFLITE_FLOAT32) {
+                ((*float)t.data)[o] = v;
+            } else if (type == TFLITE_FLOAT16) {
+                ((*uint16)t.data)[o] = tflite_f32_to_f16(v);
+            } else {
+                int q = tflite_quantize(v, t.scale, t.zero_point, type);
+                if (t.scale == 0.0) q = tflite_quantize(v, 1.0, 0, type);
+                if (type == TFLITE_INT8) ((*int8)t.data)[o] = (int8)q;
+                else ((*uint8)t.data)[o] = (uint8)q;
+            }
+        }
+    }
+    return Ok<int, string>(0);
+}
+
+// Fills input i with the image, as item 0 of its batch. An input whose height and
+// width are dynamic (-1 in its signature) is resized to the image's.
+Result<int, string> TfliteInterpreter_set_image(*TfliteInterpreter self, int i, *uint8 rgba, int w, int h, *TfliteImageFormat f) {
+    *TfliteTensor t = self.input(i);
+    if (t == null) return Err<int, string>(_tflite_bad_index(self, i));
+    if (f == null) return Err<int, string>("tflite: set_image: null format");
+    if (t.rank() == 4) {
+        int[4] dims;
+        _tflite_image_dims(f, w, h, &dims[0]);
+        dims[0] = t.dim(0);
+        bool same = true;
+        for (k in 1..4) {
+            if (t.dim(k) != dims[k]) same = false;
+        }
+        if (!same) {
+            self.resize_input(i, &dims[0], 4)?;
+            t = self.input(i);
+        }
+    }
+    return tflite_image_into(rgba, w, h, f, t, 0);
+}

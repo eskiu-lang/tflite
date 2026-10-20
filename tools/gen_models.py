@@ -180,6 +180,38 @@ def half():
     return path
 
 
+def resize():
+    # x float[1, h, w, c], size int32[2] -> bilinear resize with half-pixel centers,
+    # the reference for <tflite/image>'s tflite_image_resize.
+    @tf.function(input_signature=[tf.TensorSpec([1, None, None, 4], tf.float32, name="x"),
+                                  tf.TensorSpec([2], tf.int32, name="size")])
+    def f(x, size):
+        return tf.image.resize(x, size, method="bilinear")
+    return convert(f, os.path.join(DATA, "resize.tflite"))
+
+
+def pixels():
+    # image float[1, h, w, 3] (dynamic h and w) -> the mean of each channel [1, 3];
+    # and a fully quantized uint8 version on [1, 4, 4, 3] images in -1..1.
+    @tf.function(input_signature=[tf.TensorSpec([1, None, None, 3], tf.float32, name="image")])
+    def f(image):
+        return tf.reduce_mean(image, axis=[1, 2])
+    path = convert(f, os.path.join(DATA, "pixels.tflite"))
+
+    @tf.function(input_signature=[tf.TensorSpec([1, 4, 4, 3], tf.float32, name="image")])
+    def g(image):
+        return tf.reduce_mean(image, axis=[1, 2])
+    calib = np.random.default_rng(5).uniform(-1, 1, (32, 1, 4, 4, 3)).astype(np.float32)
+    calib[0, 0, 0, 0] = [-1, -1, -1]
+    calib[0, 0, 0, 1] = [1, 1, 1]
+
+    def rep():
+        for c in calib:
+            yield [c]
+    convert(g, os.path.join(DATA, "pixels_u8.tflite"), (rep, tf.uint8))
+    return path
+
+
 def colors():
     # A tiny image classifier for examples/classify.esk: x float[1, 32, 32, 3] normalized
     # with the ImageNet mean and std -> probabilities of red, green, blue and gray from
@@ -223,7 +255,7 @@ def main():
     os.makedirs(DATA, exist_ok=True)
     os.makedirs(EXAMPLES, exist_ok=True)
     paths = [mlp(), conv(), quant(tf.int8, "quant"), quant(tf.uint8, "quant_u8"), ints(), dynamic(),
-             multi(), half(), colors()]
+             multi(), half(), resize(), pixels(), os.path.join(DATA, "pixels_u8.tflite"), colors()]
     sample()
     for p in paths:
         print(os.path.relpath(p, ROOT))
