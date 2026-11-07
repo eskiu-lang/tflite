@@ -97,6 +97,8 @@ struct _TfliteBlob {
     *uint8 data;
 }
 
+// A loaded model (from tflite_model or tflite_model_bytes). Free it with release();
+// interpreters made from it keep what they need.
 struct TfliteModel {
     *TfLiteModel handle;
     *_TfliteBlob blob;
@@ -119,6 +121,8 @@ struct TfliteTensor {
     int zero_point;
 }
 
+// An interpreter for a model: `delegate` is the delegate it runs on (TFLITE_CPU when none
+// applied or it fell back), `inputs` and `outputs` its tensors. Free it with release().
 struct TfliteInterpreter {
     *TfLiteInterpreter handle;
     int delegate;
@@ -732,6 +736,8 @@ Result<TfliteInterpreter, string> tflite_load(string path, *TfliteOptions opts) 
     return r;
 }
 
+// Frees the interpreter, its delegate and its tensors' descriptions, and resets it; a
+// second call does nothing.
 void TfliteInterpreter_release(*TfliteInterpreter self) {
     if (self.handle != null) TfLiteInterpreterDelete(self.handle);
     self.handle = null;
@@ -742,10 +748,12 @@ void TfliteInterpreter_release(*TfliteInterpreter self) {
     *self = TfliteInterpreter{};
 }
 
+// The number of inputs.
 int TfliteInterpreter_input_count(*TfliteInterpreter self) {
     return self.inputs.size;
 }
 
+// The number of outputs.
 int TfliteInterpreter_output_count(*TfliteInterpreter self) {
     return self.outputs.size;
 }
@@ -775,6 +783,7 @@ int TfliteInterpreter_input_index(*TfliteInterpreter self, string name) {
     return _tflite_find(&self.inputs, name);
 }
 
+// The index of the output with this name, or -1.
 int TfliteInterpreter_output_index(*TfliteInterpreter self, string name) {
     return _tflite_find(&self.outputs, name);
 }
@@ -855,26 +864,32 @@ Result<int, string> TfliteInterpreter_set_input(*TfliteInterpreter self, int i, 
     return Ok<int, string>(0);
 }
 
+// Copies float32 data into input i, as set_input with TFLITE_FLOAT32.
 Result<int, string> TfliteInterpreter_set_f32(*TfliteInterpreter self, int i, *float data, *int shape, int rank) {
     return self.set_input(i, TFLITE_FLOAT32, (*void)data, shape, rank);
 }
 
+// Copies float16 (IEEE half bits) data into input i, as set_input with TFLITE_FLOAT16.
 Result<int, string> TfliteInterpreter_set_f16(*TfliteInterpreter self, int i, *uint16 data, *int shape, int rank) {
     return self.set_input(i, TFLITE_FLOAT16, (*void)data, shape, rank);
 }
 
+// Copies int8 data into input i, as set_input with TFLITE_INT8.
 Result<int, string> TfliteInterpreter_set_i8(*TfliteInterpreter self, int i, *int8 data, *int shape, int rank) {
     return self.set_input(i, TFLITE_INT8, (*void)data, shape, rank);
 }
 
+// Copies uint8 data into input i, as set_input with TFLITE_UINT8.
 Result<int, string> TfliteInterpreter_set_u8(*TfliteInterpreter self, int i, *uint8 data, *int shape, int rank) {
     return self.set_input(i, TFLITE_UINT8, (*void)data, shape, rank);
 }
 
+// Copies int32 data into input i, as set_input with TFLITE_INT32.
 Result<int, string> TfliteInterpreter_set_i32(*TfliteInterpreter self, int i, *int data, *int shape, int rank) {
     return self.set_input(i, TFLITE_INT32, (*void)data, shape, rank);
 }
 
+// Copies int64 data into input i, as set_input with TFLITE_INT64.
 Result<int, string> TfliteInterpreter_set_i64(*TfliteInterpreter self, int i, *int64 data, *int shape, int rank) {
     return self.set_input(i, TFLITE_INT64, (*void)data, shape, rank);
 }
@@ -929,6 +944,7 @@ Result<int, string> TfliteInterpreter_invoke(*TfliteInterpreter self) {
 
 // --- tensors ---
 
+// The number of dimensions.
 int TfliteTensor_rank(*TfliteTensor self) {
     return self.shape.size;
 }
@@ -955,26 +971,31 @@ bool TfliteTensor_quantized(*TfliteTensor self) {
     return (*float)self.data;
 }
 
+// The elements as float16 bits, or null when the tensor is not TFLITE_FLOAT16.
 *uint16 TfliteTensor_f16(*TfliteTensor self) {
     if (self.type != TFLITE_FLOAT16) return null;
     return (*uint16)self.data;
 }
 
+// The elements as int8, or null when the tensor is not TFLITE_INT8.
 *int8 TfliteTensor_i8(*TfliteTensor self) {
     if (self.type != TFLITE_INT8) return null;
     return (*int8)self.data;
 }
 
+// The elements as uint8, or null when the tensor is not TFLITE_UINT8.
 *uint8 TfliteTensor_u8(*TfliteTensor self) {
     if (self.type != TFLITE_UINT8) return null;
     return (*uint8)self.data;
 }
 
+// The elements as int32, or null when the tensor is not TFLITE_INT32.
 *int TfliteTensor_i32(*TfliteTensor self) {
     if (self.type != TFLITE_INT32) return null;
     return (*int)self.data;
 }
 
+// The elements as int64, or null when the tensor is not TFLITE_INT64.
 *int64 TfliteTensor_i64(*TfliteTensor self) {
     if (self.type != TFLITE_INT64) return null;
     return (*int64)self.data;
