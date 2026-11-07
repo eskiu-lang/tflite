@@ -10,7 +10,7 @@ import <tflite>;
 import <tflite/image>;
 import <gpu/image>;                  // PNG and JPEG decoding, from the gpu package
 
-Image img = image_load("cat.jpg")?;
+Bitmap img = image_load("cat.jpg")?;
 defer img.free();
 int w = (int)img.width;
 int h = (int)img.height;

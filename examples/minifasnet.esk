@@ -81,7 +81,7 @@ Result<int, string> check(string model, string path, *Face f) {
     if (in0.rank() != 4 || in0.dim(3) != 3) return Err<int, string>("the model does not take a [1, H, W, 3] image");
     int h = in0.dim(1);
     int w = in0.dim(2);
-    Image img = image_load(path)?;
+    Bitmap img = image_load(path)?;
     defer img.free();
     int iw = (int)img.width;
     int ih = (int)img.height;
