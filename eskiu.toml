@@ -4,7 +4,7 @@ version = "0.1.0"
 main = "examples/classify.esk"
 
 [deps]
-gpu = { git = "https://github.com/eskiu-lang/gpu", rev = "v0.5.0" }
+gpu = { git = "https://github.com/eskiu-lang/gpu", rev = "v0.6.0" }
 
 # TensorFlow's own tensorflowlite_c target, from the Unity package of
 # asus4/tf-lite-unity-sample (Apache-2.0), fetched by eskiuc build / run / test / fetch.

@@ -85,7 +85,7 @@ buffer can go at once.
 
 ## Install
 
-In an Eskiu package (Eskiu 0.12 or newer), on macOS and Linux:
+In an Eskiu package (Eskiu 0.15.1 or newer, for gpu 0.6.0), on macOS and Linux:
 
 ```bash
 eskiuc add tflite --git https://github.com/eskiu-lang/tflite --rev v0.1.0

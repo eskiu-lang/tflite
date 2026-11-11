@@ -81,7 +81,7 @@ On macOS and Linux there is nothing to install. The package's `eskiu.toml` names
 release (TensorFlow 2.21.0, 55 MB): the first build that links it (`eskiuc build`, `run`,
 `test`) downloads it once, checks its SHA-256 and keeps it in `~/.eskiu/native`, and every
 build links against this platform's directory of it with no `-L`. In an Eskiu package
-(Eskiu 0.12 or newer):
+(Eskiu 0.15.1 or newer, for gpu 0.6.0):
 
 On Windows, and to put the libraries somewhere else, [`tools/get_tflite.sh`](../tools/get_tflite.sh)
 downloads the same release, checks it, and copies this platform's files into `DIR/lib`:
