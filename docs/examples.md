@@ -56,7 +56,7 @@ logits for these two images to five decimals. Model files are not part of this
 repository.
 
 The [ONNX MiniFASNet](https://github.com/facenox/face-antispoof-onnx) used by
-[onnx](https://github.com/eskiu-lang/onnx)'s example has no TensorFlow Lite release; a
+[onnx](https://github.com/eskiu-packages/onnx)'s example has no TensorFlow Lite release; a
 converter such as [onnx2tf](https://github.com/PINTO0309/onnx2tf) (`onnx2tf -i
 best_model.onnx`) can make an NHWC `.tflite` of it (not tried here), which would take a
 128x128 RGB crop in 0..1 (`tflite_format_unit()`) and give two logits.

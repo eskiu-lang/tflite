@@ -87,7 +87,7 @@ On Windows, and to put the libraries somewhere else, [`tools/get_tflite.sh`](../
 downloads the same release, checks it, and copies this platform's files into `DIR/lib`:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/eskiu-lang/tflite/v0.1.0/tools/get_tflite.sh | sh -s -- ~/tflite
+curl -fsSL https://raw.githubusercontent.com/eskiu-packages/tflite/v0.1.0/tools/get_tflite.sh | sh -s -- ~/tflite
 export TFL=~/tflite
 ```
 

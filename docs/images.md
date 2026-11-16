@@ -40,6 +40,6 @@ version. `tflite_format_signed()` gives -1..1 (MobileNet, EfficientNet-Lite),
 `tflite_format_raw()` 0..255.
 
 Decoding image files is left to other packages. The examples use `<gpu/image>` from
-[gpu](https://github.com/eskiu-lang/gpu), a dependency of this package, which decodes PNG
+[gpu](https://github.com/eskiu-packages/gpu), a dependency of this package, which decodes PNG
 and JPEG in pure Eskiu and needs no GPU. It does not apply the EXIF orientation of camera
 photos.
