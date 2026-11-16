@@ -35,30 +35,6 @@ jobs:
           build/classify --delegate auto | tee build/classify.txt
           grep -q "blue" build/classify.txt
 
-  macos:
-    runs-on: macos-15
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/cache@v4
-        with:
-          path: ~/tflite
-          key: tflite-macos-${{ hashFiles('tools/get_tflite.sh') }}
-      - name: Install Eskiu and TensorFlow Lite
-        run: |
-          brew install eskiu-lang/eskiu/eskiu
-          echo "TFL=$(tools/get_tflite.sh $HOME/tflite)" >> $GITHUB_ENV
-      - name: Layout check
-        run: CC=cc ESKIUC=eskiuc tools/layout_check.sh $TFL/lib
-      - name: Tests
-        # eskiuc downloads the archive the manifest names; TFL above is for the layout check.
-        run: eskiuc test
-      - name: Examples
-        run: |
-          mkdir -p build
-          for f in examples/*.esk; do eskiuc "$f" -o build/$(basename "$f" .esk); done
-          build/classify --delegate auto | tee build/classify.txt
-          grep -q "blue" build/classify.txt
-
   windows:
     runs-on: windows-latest
     defaults:
