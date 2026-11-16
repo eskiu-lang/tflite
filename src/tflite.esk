@@ -584,4 +584,4 @@ void _tflite_free_delegate(*TfliteInterpreter self) {
     self._delegate_free = null;
 }
 
-import "tflite_interp.esk";
+import "_tflite/interp.esk";
